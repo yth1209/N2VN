@@ -1,0 +1,94 @@
+<mxfile host="65bd71144e">
+    <diagram id="n2vn_pipeline" name="N2VN Architecture">
+        <mxGraphModel dx="943" dy="614" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="800" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="node_input" value="텍스트 기반 소설 (Input)" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#0f0f0f;strokeColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="270" width="120" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_step1" value="&lt;b&gt;1. Text Parsing &amp;amp; Metadata 추출&lt;/b&gt;&lt;br&gt;(LLM / Gemini 1.5 Pro 등)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="200" y="260" width="180" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_json" value="Scene 정형화 데이터 (JSON)&lt;br&gt;- 캐릭터 외모/감정/액션&lt;br&gt;- 등장인물 대사&lt;br&gt;- 배경/BGM 프롬프트" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="420" y="250" width="200" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_step2" value="&lt;b&gt;2. Character &amp;amp; BG Generation&lt;/b&gt;&lt;br&gt;(Image Gen API / NovelAI 등)&lt;br&gt;*Seed 고정 및 태그 최적화" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="140" width="200" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_step4" value="&lt;b&gt;4. BGM Generation&lt;/b&gt;&lt;br&gt;(Text-to-Audio Model API)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="380" width="200" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_bg" value="배경 일러스트 (Image)" style="shape=note;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="920" y="100" width="140" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_char" value="캐릭터 일러스트 (Image)" style="shape=note;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="920" y="190" width="140" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_bgm" value="Looping BGM (Audio)" style="shape=note;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="920" y="390" width="140" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_step3" value="&lt;b&gt;3. Asset Post-Processing&lt;/b&gt;&lt;br&gt;(Background Removal API)&lt;br&gt;*2-Step 파이프라인" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="1100" y="180" width="180" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_trans_char" value="투명 배경 캐릭터 (PNG)&lt;br&gt;*Alpha Channel 포함" style="shape=note;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="1320" y="180" width="160" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_step5" value="&lt;b&gt;5. Web-based Player 구현&lt;/b&gt;&lt;br&gt;(Front-End / CSS 애니메이션)&lt;br&gt;*JSON 데이터 및 에셋 매핑" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="1540" y="260" width="200" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_vn" value="비주얼 노벨 (Visual Novel)&lt;br&gt;*웹 렌더링 결과물" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="1780" y="270" width="160" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="node_step6" value="&lt;b&gt;6. 사용자 평가 (정성적)&lt;/b&gt;&lt;br&gt;- 시각적 일관성/조화도&lt;br&gt;- 연출 자연스러움/몰입감" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontColor=#0f0f0f;" parent="1" vertex="1">
+                    <mxGeometry x="1980" y="260" width="180" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_input_step1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_input" target="node_step1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_step1_json" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_step1" target="node_json" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_json_step2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_json" target="node_step2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_json_step4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_json" target="node_step4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_json_step5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_json" target="node_step5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_step2_bg" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_step2" target="node_bg" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_step2_char" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_step2" target="node_char" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_step4_bgm" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_step4" target="node_bgm" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_char_step3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_char" target="node_step3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_step3_trans_char" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_step3" target="node_trans_char" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_bg_step5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_bg" target="node_step5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_trans_char_step5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_trans_char" target="node_step5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_bgm_step5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_bgm" target="node_step5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_step5_vn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_step5" target="node_vn" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="edge_vn_step6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontColor=#0f0f0f;" parent="1" source="node_vn" target="node_step6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
