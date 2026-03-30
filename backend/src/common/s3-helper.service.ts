@@ -75,4 +75,24 @@ export class S3HelperService {
     const textData = await this.readText(objectKey);
     return JSON.parse(textData);
   }
+
+  /**
+   * S3 버킷에 이미지(Buffer)를 업로드하는 헬퍼 메서드 (SSE-S3 적용)
+   */
+  async uploadImage(objectKey: string, buffer: Buffer, mimeType: string = 'image/png'): Promise<void> {
+    try {
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        Body: buffer,
+        ContentType: mimeType,
+        ServerSideEncryption: 'AES256',
+      });
+      await this.s3Client.send(command);
+      this.logger.log(`Saved Image to S3 bucket ${this.bucketName} at key: ${objectKey}`);
+    } catch (error) {
+      this.logger.error(`S3 Image 파일 업로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to upload image ${objectKey} to S3`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }
