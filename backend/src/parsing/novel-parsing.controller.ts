@@ -21,6 +21,22 @@ export class NovelParsingController {
     };
   }
 
+  @Post('backgrounds')
+  async parseBackgrounds(
+    @Body('novelTitle') novelTitle: string
+  ) {
+    if (!novelTitle) {
+      return { success: false, error: 'novelTitle parameter is required' };
+    }
+
+    const data = await this.novelParsingService.extractBackgroundsMetadata(novelTitle);
+
+    return {
+      success: true,
+      data,
+    };
+  }
+
   @Post('scenes')
   async parseScenes(
     @Body('novelTitle') novelTitle: string

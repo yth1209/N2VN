@@ -5,7 +5,7 @@ import { PromptTemplate } from '@langchain/core/prompts';
 import { StructuredOutputParser } from '@langchain/core/output_parsers';
 import { z } from 'zod';
 import { ConfigService } from '@nestjs/config';
-import { character_prompt, scene_prompt } from './prompt/prompt';
+import { character_prompt, scene_prompt, background_prompt } from './prompt/prompt';
 import { S3HelperService } from '../common/s3-helper.service';
 import { ALL_EMOTIONS, STYLE_KEYS } from '../common/constants';
 
@@ -91,6 +91,45 @@ export class NovelParsingService {
   }
 
   /**
+   * 소설 텍스트를 파싱하여 배경(Background) 메타데이터를 추출하고 S3에 저장합니다.
+   */
+  async extractBackgroundsMetadata(novelTitle: string) {
+    try {
+      const novelText = await this.s3HelperService.readText(`${novelTitle}/novel.txt`);
+
+      const backgroundSchema = z.object({
+        globalBackgroundArtStyle: z.string().describe("이 소설의 모든 배경 이미지 생성에 공통으로 적용될 환경/건축물 화풍 및 분위기 (예: highly detailed wuxia landscape, majestic ancient architecture, oriental ink painting style, 8k resolution, cinematic lighting)"),
+        styleKey: z.enum(STYLE_KEYS).describe("소설 배경 분위기에 가장 어울리는 범용적인 렌더링 필터 스타일. 무협이나 판타지는 DYNAMIC/VIBRANT, 실사풍이나 고어/무거운 분위기는 CINEMATIC/MOODY, 몽환적이면 CREATIVE 등 가장 알맞은 하나를 고를 것."),
+        backgrounds: z.record(
+          z.string().describe("배경 장소의 고유 ID (형식: 'bg_1', 'bg_2' 와 같은 양식)"),
+          z.object({
+            name: z.string().describe("배경의 실제 이름 또는 짧은 명칭 (예: 화산파 연무장, 십만대산 감옥)"),
+            description: z.string().describe("이 배경의 시각적 특징, 분위기, 주변 사물 등을 1~3문장 길이의 구체적인 영어 줄글로 묘사 (Leonardo AI 프롬프트용. 시간대 묘사는 제외할 것.)"),
+          })
+        ).describe("소설 내에 등장하는 유의미한 주요 배경들의 목록")
+      });
+
+      const parser = StructuredOutputParser.fromZodSchema(backgroundSchema);
+
+      const promptTemplate = new PromptTemplate({
+        template: background_prompt,
+        inputVariables: ['novel_text'],
+        partialVariables: { format_instructions: parser.getFormatInstructions() },
+      });
+
+      const chain = promptTemplate.pipe(this.model).pipe(parser);
+      const result = await chain.invoke({ novel_text: novelText });
+
+      await this.s3HelperService.uploadJson(`${novelTitle}/backgrounds.json`, result);
+      return result;
+
+    } catch (error) {
+      this.logger.error('배경 메타데이터 추출 중 오류 발생:', error);
+      throw new HttpException('로직 처리 중 오류가 발생했습니다.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  /**
    * 소설 텍스트를 파싱하여 장소/시간별 씬(Scene) 정보와 대사 배열을 추출합니다.
    * @param novelTitle 소설 제목 (캐릭터 메타데이터 로드용 결합)
    */
@@ -100,8 +139,8 @@ export class NovelParsingService {
 
       const sceneSchema = z.object({
         scenes: z.array(z.object({
-          location: z.string().describe("이 Scene이 일어나는 물리적 장소"),
-          time: z.string().describe("이 Scene이 일어나는 시간적 배경"),
+          backgroundId: z.string().describe("현재 장소에 가장 알맞은 backgrounds_info 내의 배경 ID (예: bg_1). 매칭되는 곳이 없다면 'bg_unknown'"),
+          timeOfDay: z.string().describe("이 Scene이 일어나는 시간대 (예: Morning, Night, Dusk)"),
           bgm_prompt: z.string().describe("Scene 분위기에 맞는 BGM 생성용 짧은 영어 프롬프트 (예: majestic orchestral battle music)"),
           dialogues: z.array(z.object({
             characterId: z.string().describe("화자의 고유 ID (characters_info 참고). 나레이션인 경우 'narrator'"),
@@ -117,7 +156,7 @@ export class NovelParsingService {
 
       const promptTemplate = new PromptTemplate({
         template: scene_prompt,
-        inputVariables: ['novel_text', 'characters_info'],
+        inputVariables: ['novel_text', 'characters_info', 'backgrounds_info'],
         partialVariables: { format_instructions: parser.getFormatInstructions() },
       });
 
@@ -132,9 +171,19 @@ export class NovelParsingService {
         this.logger.warn('characters.json not found in S3. Proceeding without characters_info.');
       }
 
+      let backgroundsInfoString = '';
+      try {
+        const bgData = await this.s3HelperService.readJson(`${novelTitle}/backgrounds.json`);
+        const bgs = bgData.backgrounds || bgData;
+        backgroundsInfoString = Object.entries(bgs).map(([id, b]: [string, any]) => `- ID: ${id}, Name: ${b.name}, Description: ${b.description}`).join('\n');
+      } catch (e) {
+        this.logger.warn('backgrounds.json not found in S3. Proceeding without backgrounds_info.');
+      }
+
       const result = await chain.invoke({
         novel_text: novelText,
-        characters_info: charactersInfoString
+        characters_info: charactersInfoString,
+        backgrounds_info: backgroundsInfoString
       });
 
       await this.s3HelperService.uploadJson(`${novelTitle}/scenes.json`, result);

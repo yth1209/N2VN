@@ -59,6 +59,42 @@ export class ImageGenerationService {
     return { success: true, message: 'Generation complete' };
   }
 
+  async generateBackgroundImages(novelTitle: string) {
+    let backgroundsData: any;
+    try {
+      backgroundsData = await this.s3HelperService.readJson(`${novelTitle}/backgrounds.json`);
+    } catch (e) {
+      throw new HttpException(`Failed to read backgrounds.json from S3 for ${novelTitle}`, HttpStatus.BAD_REQUEST);
+    }
+
+    const { globalBackgroundArtStyle, styleKey, backgrounds } = backgroundsData;
+    if (!backgrounds) {
+      throw new HttpException('Invalid backgrounds.json format', HttpStatus.BAD_REQUEST);
+    }
+
+    const actualStyleKey = styleKey || 'DYNAMIC';
+    const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
+
+    this.logger.log(`Starting background image generation for ${Object.keys(backgrounds).length} backgrounds. Art style: ${globalBackgroundArtStyle}. Leonardo StyleUUID: ${actualStyleKey}`);
+
+    const bgPromises = Object.entries(backgrounds).map(async ([bgId, bgInfo]: [string, any]) => {
+      this.logger.log(`[${bgId}] Generating background image...`);
+      const prompt = `(${globalBackgroundArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bgInfo.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
+      
+      try {
+        const { buffer } = await this.generateImageToBuffer(prompt, this.fluxModelId, undefined, undefined, selectedStyleUUID, 1280, 720);
+        await this.s3HelperService.uploadImage(`${novelTitle}/backgrounds/${bgId}.png`, buffer, 'image/png');
+        this.logger.log(`[${bgId}] Background image generated and uploaded to S3.`);
+      } catch (err: any) {
+        this.logger.error(`[${bgId}] Failed to generate background: ${err.message}`);
+      }
+    });
+
+    await Promise.all(bgPromises);
+    this.logger.log('All background generations completed successfully.');
+    return { success: true, message: 'Background generation complete' };
+  }
+
   private async processCharacter(novelTitle: string, charId: string, charInfo: any, globalArtStyle: string, styleUUID: string) {
     // 1. DEFAULT 먼저 순차 생성
     this.logger.log(`[${charId}] Generating DEFAULT emotion...`);
@@ -93,13 +129,13 @@ export class ImageGenerationService {
   /**
    * Leonardo API 기본 생성 파이프라인 (요청 -> 폴링 -> 다운로드 -> 버퍼 반환)
    */
-  private async generateImageToBuffer(prompt: string, modelId: string, initImageId?: string, initStrength?: number, styleUUID?: string): Promise<{ buffer: Buffer, imageId: string }> {
+  private async generateImageToBuffer(prompt: string, modelId: string, initImageId?: string, initStrength?: number, styleUUID?: string, width = 576, height = 1024): Promise<{ buffer: Buffer, imageId: string }> {
     const payload: any = {
       model: "flux-pro-2.0",
       public: false,
       parameters: {
-        width: 576,
-        height: 1024,
+        width,
+        height,
         quantity: 1,
         prompt,
       }

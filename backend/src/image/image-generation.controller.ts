@@ -22,4 +22,20 @@ export class ImageGenerationController {
       message: 'Image generation started in background. Check server logs for progress.',
     };
   }
+
+  @Post('backgrounds')
+  async generateBackgroundImages(@Body('novelTitle') novelTitle: string) {
+    if (!novelTitle) {
+      throw new HttpException('novelTitle is required', HttpStatus.BAD_REQUEST);
+    }
+
+    this.imageGenerationService.generateBackgroundImages(novelTitle).catch(err => {
+      // 로거 등 처리는 서비스 단에서 이미 함
+    });
+
+    return {
+      success: true,
+      message: 'Background image generation started in background. Check server logs for progress.',
+    };
+  }
 }

@@ -15,13 +15,29 @@ Novel Text:
 {novel_text}
 """`;
 
+export const background_prompt = `
+You are an expert novel environment designer.
+Read the following novel text carefully and extract detailed information about ALL distinct physical locations and background settings (e.g. "Dungeon", "Mountain Peak", "Inn") appearing in the text, as well as the overall architectural and atmospheric art style of the world.
+
+{format_instructions}
+
+[CRITICAL INSTRUCTIONS]
+- Do NOT translate the location's name into English. Keep the original name exactly as it appears in the text.
+- Translate all descriptive traits (description) into short English phrases (e.g. "dark cave with torches", "sunny bustling city street").
+- Do not invent locations that are not supported by the text.
+
+Novel Text:
+"""
+{novel_text}
+"""`;
+
 export const scene_prompt = `
 You are an expert novel scriptwriter and director.
 Your task is to analyze the provided novel text and break it down into multiple Scenes based on changes in Location or Time.
 
 For each Scene, extract the following:
-- location: The physical location of the scene.
-- time: The time of day or temporal setting.
+- backgroundId: The exact ID of the background from the provided 'backgrounds_info' that matches the current location. If completely unknown or unlisted, use "bg_unknown".
+- timeOfDay: The time of day or temporal setting (e.g., Morning, Night, Dusk).
 - bgm_prompt: A 1-2 sentence description in English for a Background Music generation AI that perfectly fits the mood and atmosphere of this scene.
 - dialogues: A sequential array of dialogues and narrations.
 
@@ -43,6 +59,9 @@ For EACH line of text or dialogue in the scene, create a dialogue prompt with:
 
 Known Characters Information:
 {characters_info}
+
+Known Backgrounds Information:
+{backgrounds_info}
 
 Novel Text:
 """
