@@ -6,13 +6,17 @@ import { StructuredOutputParser } from '@langchain/core/output_parsers';
 import { z } from 'zod';
 import { ConfigService } from '@nestjs/config';
 import { character_prompt, scene_prompt } from './prompt/prompt';
+import { S3HelperService } from '../common/s3-helper.service';
 
 @Injectable()
 export class NovelParsingService {
   private readonly logger = new Logger(NovelParsingService.name);
   private readonly model: ChatGoogleGenerativeAI;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly s3HelperService: S3HelperService,
+  ) {
     this.model = new ChatGoogleGenerativeAI({
       model: this.configService.get<string>('GEMINI_MODEL'),
       temperature: 0.1,
@@ -21,40 +25,12 @@ export class NovelParsingService {
   }
 
   /**
-   * 로컬 폴더에 JSON 데이터를 저장하는 공통 헬퍼 메서드
-   */
-  private async saveJsonToFile(novelTitle: string, fileName: string, data: any) {
-    const fs = require('fs/promises');
-    const path = require('path');
-    const dirPath = path.join(process.cwd(), '..', 'novel', novelTitle);
-    await fs.mkdir(dirPath, { recursive: true });
-    const savePath = path.join(dirPath, fileName);
-    await fs.writeFile(savePath, JSON.stringify(data, null, 2), 'utf-8');
-    this.logger.log(`Saved ${fileName} to: ${savePath}`);
-  }
-
-  /**
-   * 로컬 폴더에서 소설 텍스트를 읽어오는 공통 헬퍼 메서드
-   */
-  private async readNovelText(novelTitle: string): Promise<string> {
-    const fs = require('fs/promises');
-    const path = require('path');
-    const novelPath = path.join(process.cwd(), '..', 'novel', novelTitle, 'novel.txt');
-    try {
-      return await fs.readFile(novelPath, 'utf8');
-    } catch (error) {
-      this.logger.error(`소설 텍스트 읽기 실패: ${novelPath}`, error);
-      throw new HttpException(`Failed to read novel.txt for title: ${novelTitle}`, HttpStatus.BAD_REQUEST);
-    }
-  }
-
-  /**
    * 내부 파일을 로드하여 등장인물 메타데이터를 추출하고 로컬 파일에 저장합니다.
    * @param novelTitle 소설 제목 (파일 저장을 위한 폴더명)
    */
   async extractCharactersMetadata(novelTitle: string) {
     try {
-      const novelText = await this.readNovelText(novelTitle);
+      const novelText = await this.s3HelperService.readText(`${novelTitle}/novel.txt`);
 
       // 2. 강제할 JSON 포맷에 대한 스키마 정의 (Zod 활용)
       const characterSchema = z.record(
@@ -93,7 +69,7 @@ export class NovelParsingService {
         };
       });
 
-      await this.saveJsonToFile(novelTitle, 'characters.json', charactersObject);
+      await this.s3HelperService.uploadJson(`${novelTitle}/characters.json`, charactersObject);
 
       return charactersObject;
 
@@ -112,7 +88,7 @@ export class NovelParsingService {
    */
   async extractScenesMetadata(novelTitle: string) {
     try {
-      const novelText = await this.readNovelText(novelTitle);
+      const novelText = await this.s3HelperService.readText(`${novelTitle}/novel.txt`);
 
       const sceneSchema = z.object({
         scenes: z.array(z.object({
@@ -139,16 +115,12 @@ export class NovelParsingService {
 
       const chain = promptTemplate.pipe(this.model).pipe(parser);
 
-      const fs = require('fs/promises');
-      const path = require('path');
       let charactersInfoString = '';
       try {
-        const charPath = path.join(process.cwd(), '..', 'novel', novelTitle, 'characters.json');
-        const charactersData = await fs.readFile(charPath, 'utf-8');
-        const charactersObject = JSON.parse(charactersData);
+        const charactersObject = await this.s3HelperService.readJson(`${novelTitle}/characters.json`);
         charactersInfoString = Object.entries(charactersObject).map(([id, c]: [string, any]) => `- ID: ${id}, Name: ${c.name}, Sex: ${c.sex}, Job: ${c.job.join(', ')}`).join('\n');
       } catch (e) {
-        this.logger.warn('characters.json not found. Proceeding without characters_info.');
+        this.logger.warn('characters.json not found in S3. Proceeding without characters_info.');
       }
 
       const result = await chain.invoke({
@@ -156,7 +128,7 @@ export class NovelParsingService {
         characters_info: charactersInfoString
       });
 
-      await this.saveJsonToFile(novelTitle, 'scenes.json', result);
+      await this.s3HelperService.uploadJson(`${novelTitle}/scenes.json`, result);
 
       return result;
 
