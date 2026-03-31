@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>N2VN | AI Image Viewer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <aside>
+        <div class="logo">N2VN Visual novel</div>
+        <h4 style="margin-bottom: 12px; font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Selected Novels</h4>
+        <ul class="novel-list" id="novel-list">
+            <!-- Novels will be loaded here -->
+        </ul>
+    </aside>
+
+    <main>
+        <div id="no-novel-selected" class="empty-state">
+            <div style="font-size: 4rem; margin-bottom: 24px; filter: grayscale(1);">🖼️</div>
+            <h2>비주얼 노벨을 선택해주세요</h2>
+            <p>좌측 리스트에서 생성된 이미지를 확인할 소설을 선택하세요.</p>
+        </div>
+
+        <div id="novel-content" style="display: none;">
+            <div class="top-bar">
+                <h1 id="selected-novel-title">소설 제목</h1>
+                <div class="tabs">
+                    <div class="tab active" data-tab="characters">Characters</div>
+                    <div class="tab" data-tab="backgrounds">Backgrounds</div>
+                </div>
+            </div>
+
+            <div class="content-viewer">
+                <div id="characters-view" class="gallery-grid">
+                    <!-- Character cards will be loaded here -->
+                </div>
+                <div id="backgrounds-view" class="gallery-grid" style="display: none;">
+                    <!-- Background cards will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+### API 테스트용 변수 및 설정
+@baseUrl = http://localhost:3000
+@novelId = 1
+@novelTitle = 배신당한 화산파 삼류제자가 칼을 숨김
+
+### 1. 소설 목록 조회 (GET)
+GET {{baseUrl}}/novels
+
+### 2. 새 소설 생성 (POST)
+# @name createNovel
+POST {{baseUrl}}/novels
+Content-Type: application/json
+
+{
+    "novelTitle": "{{novelTitle}}"
+}
+
+### 3. 캐릭터 메타데이터 추출 (POST)
+# novelId를 실제 생성된 ID로 변경하여 실행하세요
+POST {{baseUrl}}/parsing/characters
+Content-Type: application/json
+
+{
+    "novelId": {{novelId}}
+}
+
+### 4. 배경 메타데이터 추출 (POST)
+POST {{baseUrl}}/parsing/backgrounds
+Content-Type: application/json
+
+{
+    "novelId": {{novelId}}
+}
+
+### 5. 씬(Scene) 메타데이터 추출 (POST)
+POST {{baseUrl}}/parsing/scenes
+Content-Type: application/json
+
+{
+    "novelId": {{novelId}}
+}
+
+### 6. 캐릭터 이미지 생성 (Leonardo AI)
+POST {{baseUrl}}/images/characters
+Content-Type: application/json
+
+{
+    "novelId": {{novelId}}
+}
+
+### 7. 배경 이미지 생성 (Leonardo AI)
+POST {{baseUrl}}/images/backgrounds
+Content-Type: application/json
+
+{
+    "novelId": {{novelId}}
+}

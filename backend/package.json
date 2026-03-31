@@ -12,10 +12,13 @@
     "@nestjs/core": "^11.1.17",
     "@nestjs/mongoose": "^11.0.4",
     "@nestjs/platform-express": "^11.1.17",
+    "@nestjs/typeorm": "^11.0.0",
     "axios": "^1.13.6",
     "mongoose": "^9.3.1",
+    "mysql2": "^3.20.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "typeorm": "^0.3.28",
     "zod": "^4.3.6"
   },
   "devDependencies": {

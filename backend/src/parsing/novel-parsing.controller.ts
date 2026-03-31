@@ -6,30 +6,29 @@ export class NovelParsingController {
 
   @Post('characters')
   async parseCharacters(
-    @Body('novelTitle') novelTitle: string
+    @Body('novelId') novelId: number
   ) {
-    if (!novelTitle) {
-      return { success: false, error: 'novelTitle parameter is required' };
+    if (!novelId) {
+      return { success: false, error: 'novelId parameter is required' };
     }
 
-    // 서비스 로직 호출 및 반환
-    const data = await this.novelParsingService.extractCharactersMetadata(novelTitle);
+    const data = await this.novelParsingService.extractCharactersMetadata(novelId);
 
     return {
       success: true,
-      data, // { "CharacterA": { look: [], job: [], character: [] }, "CharacterB": ... }
+      data,
     };
   }
 
   @Post('backgrounds')
   async parseBackgrounds(
-    @Body('novelTitle') novelTitle: string
+    @Body('novelId') novelId: number
   ) {
-    if (!novelTitle) {
-      return { success: false, error: 'novelTitle parameter is required' };
+    if (!novelId) {
+      return { success: false, error: 'novelId parameter is required' };
     }
 
-    const data = await this.novelParsingService.extractBackgroundsMetadata(novelTitle);
+    const data = await this.novelParsingService.extractBackgroundsMetadata(novelId);
 
     return {
       success: true,
@@ -39,13 +38,13 @@ export class NovelParsingController {
 
   @Post('scenes')
   async parseScenes(
-    @Body('novelTitle') novelTitle: string
+    @Body('novelId') novelId: number
   ) {
-    if (!novelTitle) {
-      return { success: false, error: 'novelTitle parameter is required' };
+    if (!novelId) {
+      return { success: false, error: 'novelId parameter is required' };
     }
 
-    const data = await this.novelParsingService.extractScenesMetadata(novelTitle);
+    const data = await this.novelParsingService.extractScenesMetadata(novelId);
 
     return {
       success: true,

@@ -3,7 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { S3HelperService } from '../common/s3-helper.service';
 
-import { ALL_EMOTIONS, REST_EMOTIONS, STYLE_UUIDS } from '../common/constants';
+import { Emotion, STYLE_UUIDS } from '../common/constants';
+import { Character } from '../entities/character.entity';
+import { RepositoryProvider } from '../common/repository.provider';
 
 @Injectable()
 export class ImageGenerationService {
@@ -15,6 +17,7 @@ export class ImageGenerationService {
   constructor(
     private readonly configService: ConfigService,
     private readonly s3HelperService: S3HelperService,
+    private readonly repo: RepositoryProvider,
   ) {
     this.apiKey = this.configService.get<string>('LEONARDO_AI_API_KEY') || this.configService.get<string>('LEONARDO_API_KEY') || '';
     this.fluxModelId = this.configService.get<string>('LEONARDO_FLUX_MODEL_ID') || '';
@@ -29,64 +32,78 @@ export class ImageGenerationService {
     };
   }
 
-  async generateCharacterImages(novelTitle: string) {
-    let charactersData: any;
-    try {
-      charactersData = await this.s3HelperService.readJson(`${novelTitle}/characters.json`);
-    } catch (e) {
-      throw new HttpException(`Failed to read characters.json from S3 for ${novelTitle}`, HttpStatus.BAD_REQUEST);
+  async generateCharacterImages(novelId: number) {
+    const novel = await this.repo.novel.findOne({ where: { id: novelId } });
+    if (!novel) throw new HttpException('Novel not found', HttpStatus.NOT_FOUND);
+
+    // 1. 해당 소설에 속하면서 genId가 NULL인(아직 생성되지 않은) 캐릭터 이미지 항목 조회
+    const pendingImages = await this.repo.characterImg.createQueryBuilder('ci')
+      .innerJoinAndSelect('ci._characterFk', 'char')
+      .where('char.novelId = :novelId', { novelId })
+      .andWhere('ci.genId IS NULL')
+      .getMany();
+
+    if (pendingImages.length === 0) {
+      this.logger.log('No pending character images to generate.');
+      return { success: true, message: 'No pending images' };
     }
 
-    const { globalArtStyle, styleKey, characters } = charactersData;
-    if (!characters) {
-      throw new HttpException('Invalid characters.json format', HttpStatus.BAD_REQUEST);
+    // 2. 캐릭터별로 그룹화
+    const charGroups = new Map<string, { char: Character, emotions: Emotion[] }>();
+    for (const pi of pendingImages) {
+      if (!charGroups.has(pi.characterId)) {
+        charGroups.set(pi.characterId, { char: pi._characterFk, emotions: [] });
+      }
+      charGroups.get(pi.characterId).emotions.push(pi.emotion);
     }
 
-    const actualStyleKey = styleKey || 'DYNAMIC';
-    this.logger.log(`Starting image generation for ${Object.keys(characters).length} characters. Art style: ${globalArtStyle}. Leonardo StyleUUID: ${actualStyleKey}`);
-
+    const globalArtStyle = novel.characterArtStyle || '';
+    const actualStyleKey = novel.characterStyleKey || 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
 
-    // 캐릭터 별로 병렬 처리 수행
-    const characterPromises = Object.entries(characters).map(([charId, charInfo]) =>
-      this.processCharacter(novelTitle, charId, charInfo as any, globalArtStyle, selectedStyleUUID)
-        .catch(err => this.logger.error(`Failed to process character ${charId}: ${err.message}`))
+    this.logger.log(`Starting selective image generation for ${charGroups.size} characters. Total pending emotions: ${pendingImages.length}`);
+
+    // 3. 캐릭터별 병렬 처리
+    const characterPromises = Array.from(charGroups.values()).map(({ char, emotions }) =>
+      this.processCharacterSelective(novel.id, char, emotions, globalArtStyle, selectedStyleUUID)
+        .catch(err => this.logger.error(`Failed to process character ${char.id}: ${err.message}`))
     );
 
-    // 전체 완료 대기
     await Promise.all(characterPromises);
-    this.logger.log('All image generations completed successfully.');
+    this.logger.log('All pending character image generations completed.');
     return { success: true, message: 'Generation complete' };
   }
 
-  async generateBackgroundImages(novelTitle: string) {
-    let backgroundsData: any;
-    try {
-      backgroundsData = await this.s3HelperService.readJson(`${novelTitle}/backgrounds.json`);
-    } catch (e) {
-      throw new HttpException(`Failed to read backgrounds.json from S3 for ${novelTitle}`, HttpStatus.BAD_REQUEST);
+  async generateBackgroundImages(novelId: number) {
+    const novel = await this.repo.novel.findOne({ where: { id: novelId } });
+    if (!novel) throw new HttpException('Novel not found', HttpStatus.NOT_FOUND);
+
+    const backgrounds = await this.repo.background.find({ where: { novelId } });
+    if (!backgrounds || backgrounds.length === 0) {
+      throw new HttpException('No backgrounds found for this novel', HttpStatus.BAD_REQUEST);
     }
 
-    const { globalBackgroundArtStyle, styleKey, backgrounds } = backgroundsData;
-    if (!backgrounds) {
-      throw new HttpException('Invalid backgrounds.json format', HttpStatus.BAD_REQUEST);
-    }
-
-    const actualStyleKey = styleKey || 'DYNAMIC';
+    const globalBackgroundArtStyle = novel.backgroundArtStyle || '';
+    const actualStyleKey = novel.backgroundStyleKey || 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
 
-    this.logger.log(`Starting background image generation for ${Object.keys(backgrounds).length} backgrounds. Art style: ${globalBackgroundArtStyle}. Leonardo StyleUUID: ${actualStyleKey}`);
+    this.logger.log(`Starting background image generation for ${backgrounds.length} backgrounds. Art style: ${globalBackgroundArtStyle}. Leonardo StyleUUID: ${actualStyleKey}`);
 
-    const bgPromises = Object.entries(backgrounds).map(async ([bgId, bgInfo]: [string, any]) => {
-      this.logger.log(`[${bgId}] Generating background image...`);
+    const bgPromises = backgrounds.map(async (bgInfo) => {
+      this.logger.log(`[${bgInfo.id}] Generating background image...`);
       const prompt = `(${globalBackgroundArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bgInfo.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
-      
+
       try {
-        const { buffer } = await this.generateImageToBuffer(prompt, this.fluxModelId, undefined, undefined, selectedStyleUUID, 1280, 720);
-        await this.s3HelperService.uploadImage(`${novelTitle}/backgrounds/${bgId}.png`, buffer, 'image/png');
-        this.logger.log(`[${bgId}] Background image generated and uploaded to S3.`);
+        const { buffer, imageId } = await this.generateImageToBuffer(prompt, this.fluxModelId, undefined, undefined, selectedStyleUUID, 1280, 720);
+        await this.s3HelperService.uploadImage(`${novel.id}/backgrounds/${bgInfo.id}.png`, buffer, 'image/png');
+
+        // Save generate background image id
+        bgInfo.genId = imageId;
+        await this.repo.background.save(bgInfo);
+
+        this.logger.log(`[${bgInfo.id}] Background image generated and uploaded to S3. genId: ${imageId}`);
       } catch (err: any) {
-        this.logger.error(`[${bgId}] Failed to generate background: ${err.message}`);
+        this.logger.error(`[${bgInfo.id}] Failed to generate background: ${err.message}`);
       }
     });
 
@@ -95,35 +112,121 @@ export class ImageGenerationService {
     return { success: true, message: 'Background generation complete' };
   }
 
-  private async processCharacter(novelTitle: string, charId: string, charInfo: any, globalArtStyle: string, styleUUID: string) {
-    // 1. DEFAULT 먼저 순차 생성
-    this.logger.log(`[${charId}] Generating DEFAULT emotion...`);
-    const defaultPrompt = `(${globalArtStyle}:1.2), ${charInfo.look}, full body shot, full length portrait, showing entire body from head to feet, standing, zoomed out, distant angle, isolated on a simple solid white background, no background, expression: default, neutral expression`;
-    const { buffer: defaultImageBuffer, imageId: initImageId } = await this.generateImageToBuffer(defaultPrompt, this.fluxModelId, undefined, undefined, styleUUID);
+  private async processCharacterSelective(
+    novelId: number, charInfo: Character, targetEmotions: Emotion[], globalArtStyle: string, styleUUID: string
+  ) {
+    const charId = charInfo.id;
 
-    await this.s3HelperService.uploadImage(`${novelTitle}/characters/${charId}_DEFAULT.png`, defaultImageBuffer, 'image/png');
-    this.logger.log(`[${charId}] DEFAULT emotion generated and uploaded to S3 (Generated ID: ${initImageId}).`);
+    // 1. DEFAULT 이미지 확보 (다른 모든 감정의 레퍼런스로 필요)
+    let defaultImg = await this.repo.characterImg.findOne({ where: { characterId: charId, emotion: Emotion.DEFAULT } });
+    let initImageId = defaultImg?.genId;
 
-    // 2. 나머지 9개 감정 병렬 생성 (생성된 initImageId 바로 사용)
-    const emotionPromises = REST_EMOTIONS.map(emotion =>
-      this.generateAndSaveEmotion(novelTitle, charId, charInfo, globalArtStyle, emotion, initImageId, styleUUID)
+    if (!initImageId) {
+      this.logger.log(`[${charId}] Generating DEFAULT emotion as reference...`);
+      const defaultPrompt = `(${globalArtStyle}:1.2), ${charInfo.look}, full body shot, full length portrait, showing entire body from head to feet, standing, zoomed out, distant angle, isolated on a simple solid white background, no background, expression: default, neutral expression`;
+      const { buffer: defaultImageBuffer, imageId: generatedId } = await this.generateImageToBuffer(defaultPrompt, this.fluxModelId, undefined, undefined, styleUUID);
+
+      await this.s3HelperService.uploadImage(`${novelId}/characters/${charId}_DEFAULT.png`, defaultImageBuffer, 'image/png');
+      await this.extractAndSaveNOBGDBSync(novelId, charId, Emotion.DEFAULT, generatedId);
+      initImageId = generatedId;
+      this.logger.log(`[${charId}] DEFAULT reference generated (ID: ${initImageId}).`);
+    }
+
+    // 2. 나머지 요청된 감정들 생성 (DEFAULT는 위에서 처리되었을 수 있으므로 제외)
+    const remainingEmotions = targetEmotions.filter(e => e !== Emotion.DEFAULT);
+    if (remainingEmotions.length === 0) return;
+
+    this.logger.log(`[${charId}] Generating remaining ${remainingEmotions.length} emotions...`);
+    const emotionPromises = remainingEmotions.map(emotion =>
+      this.generateAndSaveEmotion(novelId, charInfo, globalArtStyle, emotion as Emotion, initImageId, styleUUID)
         .catch(err => this.logger.error(`[${charId}] Failed to generate ${emotion}: ${err.message}`))
     );
 
     await Promise.all(emotionPromises);
-    this.logger.log(`[${charId}] All emotions generated.`);
+    this.logger.log(`[${charId}] Selected emotions generated.`);
   }
 
   private async generateAndSaveEmotion(
-    novelTitle: string, charId: string, charInfo: any, globalArtStyle: string, emotion: string, initImageId: string, styleUUID: string
+    novelId: number, charInfo: Character, globalArtStyle: string, emotion: Emotion, initImageId: string, styleUUID: string
   ) {
+    const charId = charInfo.id;
     this.logger.log(`[${charId}] Generating ${emotion}...`);
     const prompt = `(${globalArtStyle}:1.2), ${charInfo.look}, full body shot, full length portrait, showing entire body from head to feet, standing, zoomed out, distant angle, isolated on a simple solid white background, no background, expression: ${emotion.toLowerCase()}`;
-    // initStrength: 0.5 (원본 이미지 의존도) - 값이 클수록 원본을 덜 바꿈. 0.3 ~ 0.5 수준 유지.
-    const { buffer: imageBuffer } = await this.generateImageToBuffer(prompt, this.lucidModelId, initImageId, 0.45, styleUUID);
 
-    await this.s3HelperService.uploadImage(`${novelTitle}/characters/${charId}_${emotion}.png`, imageBuffer, 'image/png');
+    // initStrength: 0.5 (원본 이미지 의존도)
+    const { buffer: imageBuffer, imageId: newGenId } = await this.generateImageToBuffer(prompt, this.lucidModelId, initImageId, 0.45, styleUUID);
+
+    await this.s3HelperService.uploadImage(`${novelId}/characters/${charId}_${emotion}.png`, imageBuffer, 'image/png');
     this.logger.log(`[${charId}] ${emotion} emotion uploaded to S3.`);
+
+    // Automatically create NOBG right after and save to DB
+    await this.extractAndSaveNOBGDBSync(novelId, charId, emotion, newGenId);
+  }
+
+  /**
+   * NOBG 생성 및 DB upsert 로직 (Proactive)
+   */
+  private async extractAndSaveNOBGDBSync(novelId: number, characterId: string, emotion: Emotion, genId: string) {
+    const targetName = `${characterId}_${emotion}`;
+    let nobgGenId = null;
+
+    try {
+      this.logger.log(`[${targetName}] Generating NOBG via Leonardo API...`);
+      const nobgRes = await axios.post('https://cloud.leonardo.ai/api/rest/v1/variations/nobg', {
+        id: genId,
+        isVariation: false
+      }, { headers: this.getHeaders() });
+      const sdNobgJobId = nobgRes.data?.sdNobgJob?.id;
+
+      if (!sdNobgJobId) {
+        this.logger.warn(`[${targetName}] Job ID not found for nobg.`);
+      } else {
+        let nobgUrl = null;
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 4000));
+          const varRes = await axios.get(`https://cloud.leonardo.ai/api/rest/v1/variations/${genId}`, { headers: this.getHeaders() });
+          const variants = varRes.data?.generated_image_variation_generic;
+          if (variants && variants.length > 0) {
+            const nobgVar = variants.find((v: any) => v.transformType === 'BACKGROUND_REMOVAL');
+            if (nobgVar && nobgVar.url) {
+              nobgUrl = nobgVar.url;
+              nobgGenId = nobgVar.id;
+              break;
+            }
+          }
+        }
+''
+        if (nobgUrl) {
+          const dlRes = await axios.get(nobgUrl, { responseType: 'arraybuffer' });
+          await this.s3HelperService.uploadImage(`${novelId}/characters/${targetName}_NOBG.png`, dlRes.data, 'image/png');
+          this.logger.log(`[${targetName}] NOBG successfully saved to S3.`);
+        } else {
+          this.logger.warn(`[${targetName}] NOBG Generation Timeout.`);
+        }
+      }
+    } catch (err: any) {
+      this.logger.error(`[${targetName}] NOBG Extraction Failed: ${err.message}`);
+    }
+
+    // Save mapping to Database
+    try {
+      const charImg = this.repo.characterImg.create({
+        characterId,
+        emotion,
+        genId,
+        nobgGenId: nobgGenId
+      });
+      await this.repo.characterImg.save(charImg);
+    } catch (e: any) {
+      // Primary key collision? (If we run generation twice for the same char/emotion)
+      this.logger.warn(`Failed to insert into CharacterImg (Upsert logic might be needed): ${e.message}`);
+      const existing = await this.repo.characterImg.findOne({ where: { characterId, emotion } });
+      if (existing) {
+        existing.genId = genId;
+        existing.nobgGenId = nobgGenId;
+        await this.repo.characterImg.save(existing);
+      }
+    }
   }
 
   /**
@@ -146,8 +249,8 @@ export class ImageGenerationService {
         image_reference: [
           {
             image: {
-                id: initImageId,
-                type: "GENERATED"
+              id: initImageId,
+              type: "GENERATED"
             },
             strength: initStrength && initStrength > 0.4 ? "HIGH" : "MID"
           }
@@ -182,7 +285,7 @@ export class ImageGenerationService {
       }
 
       const imageUrl = completedData.generated_images[0].url;
-      const imageId = completedData.generated_images[0].id;
+      const imageId = completedData.generated_images[0].id; // Extract generated_image ID
       const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer' });
       return { buffer: Buffer.from(imgRes.data, 'binary'), imageId };
 
