@@ -34,13 +34,13 @@ export class NovelParsingService {
       const novelText = await this.s3HelperService.readText(`${novel.id}/novel.txt`);
 
       const characterSchema = z.object({
-        globalArtStyle: z.string().describe("해당 소설 세계관의 모든 캐릭터 이미지 생성 시 공통으로 적용될 통일된 화풍(Art Style) 및 렌더링 스타일 특징을 묘사하는 영어 프롬프트 (예: high quality webtoon style, detailed wuxia illustration, masterpiece, aesthetic anime lighting)"),
+        globalArtStyle: z.string().describe("이 소설의 모든 캐릭터 이미지 생성 시 공통으로 적용될 화풍(Art Style) 및 렌더링 스타일 특징을 묘사하는 쉼표로 구분된 영어 키워드 리스트 (예: masterpiece, best quality, high quality anime style, detailed wuxia illustration, cinematic lighting)"),
         styleKey: z.nativeEnum(StyleKey).describe("소설 장르 및 분위기에 가장 어울리는 범용적인 렌더링 필터 스타일. 무협이나 판타지는 DYNAMIC/VIBRANT, 실사풍이나 고어/무거운 분위기는 CINEMATIC/MOODY, 몽환적이면 CREATIVE 등 가장 알맞은 하나를 고를 것."),
         characters: z.record(
           z.string().describe("등장인물의 원본 이름 (영어로 번역 절대 하지 말 것, 원문 그대로 작성, 예: 백무진, 진소룡)"),
           z.object({
             sex: z.string().describe("성별 (예: male, female, unknown)"),
-            look: z.string().describe("이 캐릭터의 나이, 직업, 성격, 성향, 외견 및 옷차림 특징을 모두 포괄하여 Leonardo AI 이미지 생성 프롬프트로 바로 쓸 수 있는 1~3문장 길이의 구체적인 영어 줄글"),
+            look: z.string().describe("이 캐릭터의 시각적 'Character Bible' 프롬프트. 나이/성별, 머리스타일/색, 얼굴/신체 특징, 구체적인 의상, 무기/장신구를 모두 포함하는 쉼표로 구분된 영어 키워드. (표정 금지). 만약 소설 원문에 묘사가 부족하다면, 장르와 직업에 맞춰 어울리는 디테일을 스스로 창작(Infer)하여 반드시 꽉 찬 묘사를 완성할 것. 만약 캐릭터의 외모가 너무 평범하다면, AI가 동일 인물임을 쉽게 식별할 수 있도록 세계관에 어울리는 작은 고유 식별자(예: 눈 밑의 점, 귓바퀴의 흉터, 특이한 귀걸이, 독특하게 땋은 옆머리 등)를 최소 1개 이상 반드시 창작하여 추가할 것. (예: 1boy, 20s, black hair tied in topknot with a white hair streak, black forehead mark, dark brown eyes, lean physique, gray martial arts robes with black sash, old iron sword)"),
           })
         )
       });

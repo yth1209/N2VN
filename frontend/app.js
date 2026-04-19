@@ -60,7 +60,7 @@ async function selectNovel(id, element) {
             currentAssets = result.data;
             renderAssets();
             noNovelEl.style.display = 'none';
-            novelContentEl.style.display = 'block';
+            novelContentEl.style.display = 'flex';
             novelTitleEl.textContent = currentAssets.novel.novelTitle;
         }
     } catch (err) {
@@ -98,30 +98,40 @@ function renderCharacters() {
         return;
     }
 
-    charactersViewEl.innerHTML = currentAssets.characters.map((char, index) => {
-        // 기본 감정 설정
-        const defaultEmotion = char.images.find(img => img.emotion === 'DEFAULT') || char.images[0];
-        const emotionTags = char.images.map(img => `
-            <button class="emotion-btn ${img.emotion === 'DEFAULT' ? 'active' : ''}" 
-                    onclick="switchEmotion('${char.id}', '${img.emotion}', this)">
-                ${img.emotion}
-            </button>
-        `).join('');
-
-        return `
-            <div class="asset-card character-card" id="card-${char.id}">
+    charactersViewEl.style.display = 'block'; // Change from grid to block for rows
+    charactersViewEl.innerHTML = currentAssets.characters.map(char => {
+        const emotionCards = char.images.map(img => `
+            <div class="emotion-card" id="emotion-card-${char.id}-${img.emotion}">
                 <div class="card-image-wrap">
-                    <div class="nobg-toggle" onclick="toggleNobg('${char.id}')" id="nobg-btn-${char.id}">NOBG OFF</div>
-                    <img id="img-${char.id}" src="${defaultEmotion?.url || ''}" alt="${char.name}" onerror="this.style.opacity='0'">
-                    <div id="placeholder-${char.id}" class="nobg-placeholder" style="display: none;">
-                        배경 제거(NOBG) 이미지가<br>아직 생성되지 않았습니다.
+                    <img id="img-${char.id}-${img.emotion}" src="${img.url || ''}" alt="${char.name} ${img.emotion}" onerror="this.style.opacity='0'">
+                    <div id="placeholder-${char.id}-${img.emotion}" class="nobg-placeholder" style="display: none;">
+                        NOBG 준비 중
                     </div>
                 </div>
                 <div class="card-info">
-                    <h3>${char.name}</h3>
-                    <p class="card-description">${char.look}</p>
-                    <div class="emotion-selector">
-                        ${emotionTags}
+                    <span class="emotion-label">${img.emotion}</span>
+                </div>
+            </div>
+        `).join('');
+
+        return `
+            <div class="character-row" id="row-${char.id}">
+                <div class="character-info-panel">
+                    <div class="char-header">
+                        <span class="char-tag">${char.sex || 'Unknown'}</span>
+                        <h2>${char.name}</h2>
+                    </div>
+                    <div class="char-look">
+                        ${char.look || '설명이 없습니다.'}
+                    </div>
+                </div>
+                <div class="emotion-bar-container">
+                    <div class="emotion-bar-header">
+                        <div class="emotion-title">Emotion Gallery</div>
+                        <div class="nobg-toggle" onclick="toggleNobgRow('${char.id}')" id="nobg-btn-${char.id}">NOBG OFF</div>
+                    </div>
+                    <div class="emotion-bar" id="bar-${char.id}">
+                        ${emotionCards}
                     </div>
                 </div>
             </div>
@@ -141,67 +151,42 @@ function renderBackgrounds() {
                 <img src="${bg.url || ''}" alt="${bg.name}" onerror="this.style.display='none'">
                 ${!bg.url ? '<div class="nobg-placeholder">이미지 생성 중...</div>' : ''}
             </div>
-            <div class="card-info">
-                <h3>${bg.name}</h3>
-                <p class="card-description" style="-webkit-line-clamp: 4;">${bg.description}</p>
+            <div class="card-info" style="padding: 20px; text-align: left;">
+                <h3 style="font-family: 'Outfit', sans-serif; font-size: 1.15rem; font-weight: 600; margin-bottom: 8px;">${bg.name}</h3>
+                <p class="card-description" style="font-size: 0.85rem; color: var(--text-dim); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">${bg.description}</p>
             </div>
         </div>
     `).join('');
 }
 
 // Global scope functions for onclick handlers
-window.switchEmotion = (charId, emotion, btn) => {
-    const char = currentAssets.characters.find(c => c.id === charId);
-    const imgData = char.images.find(i => i.emotion === emotion);
-    const imgEl = document.getElementById(`img-${charId}`);
-    const nobgBtn = document.getElementById(`nobg-btn-${charId}`);
-    const placeholder = document.getElementById(`placeholder-${charId}`);
-
-    // Update buttons
-    const card = document.getElementById(`card-${charId}`);
-    card.querySelectorAll('.emotion-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    // Update Image
-    const isNobg = nobgBtn.classList.contains('active');
-    updateCardImage(charId, imgData, isNobg);
-};
-
-window.toggleNobg = (charId) => {
+window.toggleNobgRow = (charId) => {
     const btn = document.getElementById(`nobg-btn-${charId}`);
     const isActive = btn.classList.toggle('active');
     btn.textContent = isActive ? 'NOBG ON' : 'NOBG OFF';
 
-    // Find current emotion
-    const card = document.getElementById(`card-${charId}`);
-    const activeBtn = card.querySelector('.emotion-btn.active');
-    const emotion = activeBtn.textContent.trim();
-    
     const char = currentAssets.characters.find(c => c.id === charId);
-    const imgData = char.images.find(i => i.emotion === emotion);
+    
+    char.images.forEach(imgData => {
+        const imgEl = document.getElementById(`img-${charId}-${imgData.emotion}`);
+        const placeholder = document.getElementById(`placeholder-${charId}-${imgData.emotion}`);
 
-    updateCardImage(charId, imgData, isActive);
-};
-
-function updateCardImage(charId, imgData, isNobg) {
-    const imgEl = document.getElementById(`img-${charId}`);
-    const placeholder = document.getElementById(`placeholder-${charId}`);
-
-    if (isNobg) {
-        if (imgData.nobgUrl) {
-            imgEl.src = imgData.nobgUrl;
+        if (isActive) {
+            if (imgData.nobgUrl) {
+                imgEl.src = imgData.nobgUrl;
+                imgEl.style.display = 'block';
+                placeholder.style.display = 'none';
+            } else {
+                imgEl.style.display = 'none';
+                placeholder.style.display = 'flex';
+            }
+        } else {
+            imgEl.src = imgData.url || '';
             imgEl.style.display = 'block';
             placeholder.style.display = 'none';
-        } else {
-            imgEl.style.display = 'none';
-            placeholder.style.display = 'flex';
         }
-    } else {
-        imgEl.src = imgData.url || '';
-        imgEl.style.display = 'block';
-        placeholder.style.display = 'none';
-    }
-}
+    });
+};
 
 // Start the app
 init();

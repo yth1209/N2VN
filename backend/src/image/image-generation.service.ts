@@ -4,8 +4,9 @@ import axios from 'axios';
 import { S3HelperService } from '../common/s3-helper.service';
 
 import { Emotion, STYLE_UUIDS } from '../common/constants';
-import { Character } from '../entities/character.entity';
 import { RepositoryProvider } from '../common/repository.provider';
+import { CharacterImg } from '../entities/character-img.entity';
+import { getCharacterPrompt } from './prompt/prompt';
 
 @Injectable()
 export class ImageGenerationService {
@@ -41,21 +42,15 @@ export class ImageGenerationService {
       .innerJoinAndSelect('ci._characterFk', 'char')
       .where('char.novelId = :novelId', { novelId })
       .andWhere('ci.genId IS NULL')
+      .orWhere('ci.emotion = :emotion', {emotion: Emotion.DEFAULT})
       .getMany();
 
     if (pendingImages.length === 0) {
-      this.logger.log('No pending character images to generate.');
       return { success: true, message: 'No pending images' };
     }
 
     // 2. 캐릭터별로 그룹화
-    const charGroups = new Map<string, { char: Character, emotions: Emotion[] }>();
-    for (const pi of pendingImages) {
-      if (!charGroups.has(pi.characterId)) {
-        charGroups.set(pi.characterId, { char: pi._characterFk, emotions: [] });
-      }
-      charGroups.get(pi.characterId).emotions.push(pi.emotion);
-    }
+    const charGroups = Map.groupBy(pendingImages, (pi) => pi.characterId)
 
     const globalArtStyle = novel.characterArtStyle || '';
     const actualStyleKey = novel.characterStyleKey || 'DYNAMIC';
@@ -64,9 +59,9 @@ export class ImageGenerationService {
     this.logger.log(`Starting selective image generation for ${charGroups.size} characters. Total pending emotions: ${pendingImages.length}`);
 
     // 3. 캐릭터별 병렬 처리
-    const characterPromises = Array.from(charGroups.values()).map(({ char, emotions }) =>
-      this.processCharacterSelective(novel.id, char, emotions, globalArtStyle, selectedStyleUUID)
-        .catch(err => this.logger.error(`Failed to process character ${char.id}: ${err.message}`))
+    const characterPromises = Array.from(charGroups.values()).map((pis) =>
+      this.processCharacterSelective(novel.id, pis, globalArtStyle, selectedStyleUUID)
+        .catch(err => this.logger.error(`Failed to process character ${pis[0].characterId}: ${err.message}`))
     );
 
     await Promise.all(characterPromises);
@@ -94,7 +89,7 @@ export class ImageGenerationService {
       const prompt = `(${globalBackgroundArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bgInfo.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
 
       try {
-        const { buffer, imageId } = await this.generateImageToBuffer(prompt, this.fluxModelId, undefined, undefined, selectedStyleUUID, 1280, 720);
+        const { buffer, imageId } = await this.generateImageToBuffer(prompt, this.fluxModelId, undefined, selectedStyleUUID, 1280, 720);
         await this.s3HelperService.uploadImage(`${novel.id}/backgrounds/${bgInfo.id}.png`, buffer, 'image/png');
 
         // Save generate background image id
@@ -113,33 +108,36 @@ export class ImageGenerationService {
   }
 
   private async processCharacterSelective(
-    novelId: number, charInfo: Character, targetEmotions: Emotion[], globalArtStyle: string, styleUUID: string
+    novelId: number, pendingCharImgs: CharacterImg[], globalArtStyle: string, styleUUID: string
   ) {
-    const charId = charInfo.id;
-
     // 1. DEFAULT 이미지 확보 (다른 모든 감정의 레퍼런스로 필요)
-    let defaultImg = await this.repo.characterImg.findOne({ where: { characterId: charId, emotion: Emotion.DEFAULT } });
-    let initImageId = defaultImg?.genId;
+    let defaultImg = pendingCharImgs.find(pci => pci.emotion===Emotion.DEFAULT)
+    if(!defaultImg) throw new HttpException('DEFAULT image not found', HttpStatus.BAD_REQUEST)
 
-    if (!initImageId) {
+    const charId = defaultImg.characterId
+    const charInfo=defaultImg._characterFk
+
+    if (!defaultImg.genId) {
       this.logger.log(`[${charId}] Generating DEFAULT emotion as reference...`);
-      const defaultPrompt = `(${globalArtStyle}:1.2), ${charInfo.look}, full body shot, full length portrait, showing entire body from head to feet, standing, zoomed out, distant angle, isolated on a simple solid white background, no background, expression: default, neutral expression`;
-      const { buffer: defaultImageBuffer, imageId: generatedId } = await this.generateImageToBuffer(defaultPrompt, this.fluxModelId, undefined, undefined, styleUUID);
+      const defaultPrompt = getCharacterPrompt(globalArtStyle, charInfo.look, Emotion.DEFAULT)
+      const { buffer: defaultImageBuffer, imageId: generatedId } = await this.generateImageToBuffer(defaultPrompt, this.fluxModelId, undefined, styleUUID);
+      defaultImg.genId = generatedId;
 
       await this.s3HelperService.uploadImage(`${novelId}/characters/${charId}_DEFAULT.png`, defaultImageBuffer, 'image/png');
-      await this.extractAndSaveNOBGDBSync(novelId, charId, Emotion.DEFAULT, generatedId);
-      initImageId = generatedId;
-      this.logger.log(`[${charId}] DEFAULT reference generated (ID: ${initImageId}).`);
+      defaultImg.nobgGenId = await this.extractAndSaveNOBGDBSync(novelId, defaultImg);
+      await this.repo.characterImg.save(defaultImg)
+
+      this.logger.log(`[${charId}] DEFAULT reference generated (ID: ${defaultImg.genId}).`);
     }
 
     // 2. 나머지 요청된 감정들 생성 (DEFAULT는 위에서 처리되었을 수 있으므로 제외)
-    const remainingEmotions = targetEmotions.filter(e => e !== Emotion.DEFAULT);
+    const remainingEmotions = pendingCharImgs.filter(pci => pci.emotion !== Emotion.DEFAULT);
     if (remainingEmotions.length === 0) return;
 
     this.logger.log(`[${charId}] Generating remaining ${remainingEmotions.length} emotions...`);
-    const emotionPromises = remainingEmotions.map(emotion =>
-      this.generateAndSaveEmotion(novelId, charInfo, globalArtStyle, emotion as Emotion, initImageId, styleUUID)
-        .catch(err => this.logger.error(`[${charId}] Failed to generate ${emotion}: ${err.message}`))
+    const emotionPromises = remainingEmotions.map(pci =>
+      this.generateAndSaveEmotion(novelId, pci, globalArtStyle, defaultImg.genId, styleUUID)
+        .catch(err => this.logger.error(`[${charId}] Failed to generate ${pci.emotion}: ${err.message}`))
     );
 
     await Promise.all(emotionPromises);
@@ -147,61 +145,76 @@ export class ImageGenerationService {
   }
 
   private async generateAndSaveEmotion(
-    novelId: number, charInfo: Character, globalArtStyle: string, emotion: Emotion, initImageId: string, styleUUID: string
+    novelId: number, cimg: CharacterImg, globalArtStyle: string, initImageId: string, styleUUID: string
   ) {
-    const charId = charInfo.id;
-    this.logger.log(`[${charId}] Generating ${emotion}...`);
-    const prompt = `(${globalArtStyle}:1.2), ${charInfo.look}, full body shot, full length portrait, showing entire body from head to feet, standing, zoomed out, distant angle, isolated on a simple solid white background, no background, expression: ${emotion.toLowerCase()}`;
-
-    // initStrength: 0.5 (원본 이미지 의존도)
-    const { buffer: imageBuffer, imageId: newGenId } = await this.generateImageToBuffer(prompt, this.lucidModelId, initImageId, 0.45, styleUUID);
-
-    await this.s3HelperService.uploadImage(`${novelId}/characters/${charId}_${emotion}.png`, imageBuffer, 'image/png');
-    this.logger.log(`[${charId}] ${emotion} emotion uploaded to S3.`);
-
+    const charId = cimg.characterId;
+    this.logger.log(`[${charId}] Generating ${cimg.emotion}...`);
+    const prompt = getCharacterPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion)
+    const { buffer: imageBuffer, imageId: newGenId } = await this.generateImageToBuffer(prompt, this.lucidModelId, initImageId, styleUUID);
+    cimg.genId = newGenId
+    
+    await this.s3HelperService.uploadImage(`${novelId}/characters/${charId}_${cimg.emotion}.png`, imageBuffer, 'image/png');
+    this.logger.log(`[${charId}] ${cimg.emotion} emotion uploaded to S3.`);
+    await this.repo.characterImg.save(cimg)
+    
     // Automatically create NOBG right after and save to DB
-    await this.extractAndSaveNOBGDBSync(novelId, charId, emotion, newGenId);
+    cimg.nobgGenId = await this.extractAndSaveNOBGDBSync(novelId, cimg);
+    await this.repo.characterImg.save(cimg)
+  }
+
+  /**
+   * 지정된 조건이 만족될 때까지 반복 확인하는 유틸리티
+   */
+  private async poll<T>(
+    taskName: string,
+    fn: () => Promise<T | null | undefined>
+  ): Promise<T> {
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const result = await fn();
+      if (result) return result;
+    }
+    throw new Error(`${taskName} timeout after 180s`);
   }
 
   /**
    * NOBG 생성 및 DB upsert 로직 (Proactive)
    */
-  private async extractAndSaveNOBGDBSync(novelId: number, characterId: string, emotion: Emotion, genId: string) {
-    const targetName = `${characterId}_${emotion}`;
-    let nobgGenId = null;
-
+  private async extractAndSaveNOBGDBSync(novelId: number, cimg: CharacterImg) : Promise<string> {
+    const targetName = `${cimg.characterId}_${cimg.emotion}`;
+    let nobgGenId: string;
     try {
       this.logger.log(`[${targetName}] Generating NOBG via Leonardo API...`);
       const nobgRes = await axios.post('https://cloud.leonardo.ai/api/rest/v1/variations/nobg', {
-        id: genId,
-        isVariation: false
+        id: cimg.genId
       }, { headers: this.getHeaders() });
       const sdNobgJobId = nobgRes.data?.sdNobgJob?.id;
 
       if (!sdNobgJobId) {
         this.logger.warn(`[${targetName}] Job ID not found for nobg.`);
       } else {
-        let nobgUrl = null;
-        for (let i = 0; i < 20; i++) {
-          await new Promise(r => setTimeout(r, 4000));
-          const varRes = await axios.get(`https://cloud.leonardo.ai/api/rest/v1/variations/${genId}`, { headers: this.getHeaders() });
-          const variants = varRes.data?.generated_image_variation_generic;
-          if (variants && variants.length > 0) {
-            const nobgVar = variants.find((v: any) => v.transformType === 'BACKGROUND_REMOVAL');
-            if (nobgVar && nobgVar.url) {
-              nobgUrl = nobgVar.url;
-              nobgGenId = nobgVar.id;
-              break;
+        const nobgUrl = await this.poll(
+          `NOBG [${targetName}]`,
+          async () => {
+            const varRes = await axios.get(`https://cloud.leonardo.ai/api/rest/v1/variations/${sdNobgJobId}`, {
+              headers: this.getHeaders(),
+            });
+            const variants = varRes.data?.generated_image_variation_generic;
+            if (variants && variants.length > 0) {
+              const nobgVar = variants.find((v: any) => v.transformType === 'NOBG');
+              if (nobgVar && nobgVar.url) {
+                nobgGenId = nobgVar.id;
+                return nobgVar.url as string;
+              }
             }
+            return null;
           }
-        }
-''
+        );
+
         if (nobgUrl) {
           const dlRes = await axios.get(nobgUrl, { responseType: 'arraybuffer' });
           await this.s3HelperService.uploadImage(`${novelId}/characters/${targetName}_NOBG.png`, dlRes.data, 'image/png');
           this.logger.log(`[${targetName}] NOBG successfully saved to S3.`);
-        } else {
-          this.logger.warn(`[${targetName}] NOBG Generation Timeout.`);
         }
       }
     } catch (err: any) {
@@ -209,30 +222,13 @@ export class ImageGenerationService {
     }
 
     // Save mapping to Database
-    try {
-      const charImg = this.repo.characterImg.create({
-        characterId,
-        emotion,
-        genId,
-        nobgGenId: nobgGenId
-      });
-      await this.repo.characterImg.save(charImg);
-    } catch (e: any) {
-      // Primary key collision? (If we run generation twice for the same char/emotion)
-      this.logger.warn(`Failed to insert into CharacterImg (Upsert logic might be needed): ${e.message}`);
-      const existing = await this.repo.characterImg.findOne({ where: { characterId, emotion } });
-      if (existing) {
-        existing.genId = genId;
-        existing.nobgGenId = nobgGenId;
-        await this.repo.characterImg.save(existing);
-      }
-    }
+    return nobgGenId
   }
 
   /**
    * Leonardo API 기본 생성 파이프라인 (요청 -> 폴링 -> 다운로드 -> 버퍼 반환)
    */
-  private async generateImageToBuffer(prompt: string, modelId: string, initImageId?: string, initStrength?: number, styleUUID?: string, width = 576, height = 1024): Promise<{ buffer: Buffer, imageId: string }> {
+  private async generateImageToBuffer(prompt: string, modelId: string, initImageId?: string, styleUUID?: string, width = 576, height = 1024): Promise<{ buffer: Buffer, imageId: string }> {
     const payload: any = {
       model: "flux-pro-2.0",
       public: false,
@@ -252,7 +248,7 @@ export class ImageGenerationService {
               id: initImageId,
               type: "GENERATED"
             },
-            strength: initStrength && initStrength > 0.4 ? "HIGH" : "MID"
+            strength: "HIGH"
           }
         ]
       };
@@ -267,18 +263,21 @@ export class ImageGenerationService {
       }
 
       // 폴링 로직
-      let completedData: any = null;
-      for (let i = 0; i < 30; i++) { // 최대 30회 (약 90초) 대기
-        await new Promise(r => setTimeout(r, 3000));
-        const statusRes = await axios.get(`https://cloud.leonardo.ai/api/rest/v1/generations/${generationId}`, { headers: this.getHeaders() });
-        const generation = statusRes.data?.generations_by_pk;
-        if (generation.status === 'COMPLETE') {
-          completedData = generation;
-          break;
-        } else if (generation.status === 'FAILED') {
-          throw new Error('Leonardo Generation failed.');
+      const completedData = await this.poll(
+        `Generation [${generationId}]`,
+        async () => {
+          const statusRes = await axios.get(`https://cloud.leonardo.ai/api/rest/v1/generations/${generationId}`, {
+            headers: this.getHeaders(),
+          });
+          const generation = statusRes.data?.generations_by_pk;
+          if (generation.status === 'COMPLETE') {
+            return generation;
+          } else if (generation.status === 'FAILED') {
+            throw new Error('Leonardo Generation failed.');
+          }
+          return null;
         }
-      }
+      );
 
       if (!completedData || !completedData.generated_images || completedData.generated_images.length === 0) {
         throw new Error('Generation timeout or empty images from Leonardo.');

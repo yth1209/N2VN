@@ -1,14 +1,15 @@
 export const character_prompt = `
-You are an expert novel metadata extractor. 
-Read the following novel text carefully and extract detailed character design information about ALL characters appearing in the text.
+You are an expert Art Director for a Visual Novel. 
+Read the following novel text carefully and extract detailed character design information to create a definitive "Character Bible" for ALL characters appearing in the text.
 
 {format_instructions}
 
 [CRITICAL INSTRUCTIONS]
 - Do NOT translate the character's name into English. Keep the original name exactly as it appears in the text.
-- Translate all descriptive traits (sex, age, look, job, character) into short English keywords or phrases (e.g. "cute", "blue shirt", "male", "20s"), regardless of the language of the original text.
-- Do not invent characters or details that are not implicitly or explicitly supported by the text.
-- If a specific piece of information is completely unknown, return an empty array [] for array attributes, or "unknown" for string attributes.
+- [STRICTLY FORBIDDEN] Do NOT include any facial expressions, emotions, or mood descriptions (e.g. "smiling", "angry", "happy", "serious look") in the 'look' field. These will be handled dynamically in real-time.
+- The 'look' field MUST be a dense, comma-separated English prompt designed for Stable Diffusion / Leonardo API. 
+- [VITAL: CREATIVE INFERENCE] Novels often omit minor visual details (e.g., exact hairstyle, eye color, clothing layers). If specific physical traits or clothing details are not explicitly mentioned, you MUST INFER and CREATE highly specific details based on the character's job, personality, and the genre's typical tropes. Do not use generic words or "unknown".
+- Format the 'look' field by strictly combining these 5 elements: 1. Age/Gender (e.g., 1boy, 20s), 2. Detailed Hair (color, length, specific style), 3. Face/Body features (eye color, specific body type, tattoos/scars if any), 4. Detailed Clothing (colors, layers, specific items), 5. Props/Weapons.
 
 Novel Text:
 """
