@@ -55,3 +55,9 @@ Content-Type: application/json
 {
     "novelId": {{novelId}}
 }
+
+### 8. 소설 에셋 조회 (GET) — 캐릭터·배경 S3 URL 반환
+GET {{baseUrl}}/novels/{{novelId}}/assets
+
+### 9. Monogatari VN 스크립트 조회 (GET) — 비주얼 노벨 변환 결과
+GET {{baseUrl}}/novels/{{novelId}}/vn-script

@@ -31,4 +31,13 @@ export class NovelController {
       data,
     };
   }
+
+  @Get(':id/vn-script')
+  async getVnScript(@Param('id') id: string) {
+    const data = await this.novelService.getVnScript(Number(id));
+    return {
+      success: true,
+      data,
+    };
+  }
 }

@@ -10,6 +10,8 @@ const novelContentEl = document.getElementById('novel-content');
 const novelTitleEl = document.getElementById('selected-novel-title');
 const charactersViewEl = document.getElementById('characters-view');
 const backgroundsViewEl = document.getElementById('backgrounds-view');
+const vnViewEl   = document.getElementById('vn-view');
+const vnIframeEl = document.getElementById('vn-iframe');
 const tabs = document.querySelectorAll('.tab');
 
 // Initialization
@@ -62,6 +64,10 @@ async function selectNovel(id, element) {
             noNovelEl.style.display = 'none';
             novelContentEl.style.display = 'flex';
             novelTitleEl.textContent = currentAssets.novel.novelTitle;
+            // VN 탭 활성 상태에서 소설을 변경하면 즉시 전달
+            if (activeTab === 'vn') {
+                sendNovelIdToVnPlayer(currentNovelId);
+            }
         }
     } catch (err) {
         console.error('Failed to fetch assets:', err);
@@ -79,12 +85,30 @@ function setupEventListeners() {
             if (activeTab === 'characters') {
                 charactersViewEl.style.display = 'grid';
                 backgroundsViewEl.style.display = 'none';
-            } else {
+                vnViewEl.style.display = 'none';
+            } else if (activeTab === 'backgrounds') {
                 charactersViewEl.style.display = 'none';
                 backgroundsViewEl.style.display = 'grid';
+                vnViewEl.style.display = 'none';
+            } else if (activeTab === 'vn') {
+                charactersViewEl.style.display = 'none';
+                backgroundsViewEl.style.display = 'none';
+                vnViewEl.style.display = 'block';
+                if (currentNovelId) {
+                    sendNovelIdToVnPlayer(currentNovelId);
+                }
             }
         });
     });
+}
+
+function sendNovelIdToVnPlayer(novelId) {
+    // iframe 리로드 후 load 완료 시 postMessage 전송
+    vnIframeEl.src = 'player.html';
+    vnIframeEl.onload = () => {
+        vnIframeEl.contentWindow.postMessage({ novelId }, '*');
+        vnIframeEl.onload = null;
+    };
 }
 
 function renderAssets() {

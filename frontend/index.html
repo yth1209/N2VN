@@ -28,6 +28,7 @@
                 <div class="tabs">
                     <div class="tab active" data-tab="characters">Characters</div>
                     <div class="tab" data-tab="backgrounds">Backgrounds</div>
+                    <div class="tab" data-tab="vn">Visual Novel</div>
                 </div>
             </div>
 
@@ -37,6 +38,14 @@
                 </div>
                 <div id="backgrounds-view" class="gallery-grid" style="display: none;">
                     <!-- Background cards will be loaded here -->
+                </div>
+                <div id="vn-view" style="display: none; width: 100%; height: 600px;">
+                    <iframe
+                        id="vn-iframe"
+                        src="player.html"
+                        style="width: 100%; height: 100%; border: none; border-radius: 8px;"
+                        allow="autoplay"
+                    ></iframe>
                 </div>
             </div>
         </div>

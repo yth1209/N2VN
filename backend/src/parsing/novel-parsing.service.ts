@@ -164,7 +164,10 @@ export class NovelParsingService {
             dialog: z.string().describe("대사 또는 서술 내용 문장 원문 (번역 금지)"),
             action: z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe("화자의 행동/동작 (반드시 다음 중 한 가지만 선택: IDLE, ATTACK, SHAKE)"),
             emotion: z.nativeEnum(Emotion).describe(`화자의 감정 (반드시 다음 중 한 가지만 선택: ${Object.values(Emotion).join(', ')})`),
-            look: z.string().describe("화자의 표정이나 드러나는 외모를 묘사하는 짧은 영어 구문 (알 수 없으면 'unknown')")
+            look: z.string().describe("화자의 표정이나 드러나는 외모를 묘사하는 짧은 영어 구문 (알 수 없으면 'unknown')"),
+            isEntry: z.boolean().describe("이 대사가 해당 캐릭터의 씬 내 첫 번째 등장인 경우 true. narrator는 항상 false"),
+            isExit: z.boolean().describe("이 대사가 해당 캐릭터가 씬에서 마지막으로 말하는 대사인 경우 true. narrator는 항상 false"),
+            position: z.enum(['left', 'center', 'right']).describe("캐릭터의 화면 위치. 캐릭터 혼자 화면에 있으면 center. 두 명 이상이 동시에 화면에 있으면 left/right로 자연스럽게 배치. narrator는 center"),
           })).describe("이 씬에 포함되는 모든 대사와 나레이션을 순서대로 담은 배열")
         }))
       });

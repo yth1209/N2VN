@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>N2VN Player</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    /* ── Loading ──────────────────────────────────── */
+    #loading-overlay {
+      position: fixed; inset: 0;
+      background: #0a0a0a;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      gap: 14px;
+      z-index: 9999;
+    }
+    #loading-overlay.hidden { display: none; }
+
+    .loading-logo {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 0.3em;
+      color: #c9a96e;
+    }
+    .loading-spinner {
+      width: 28px; height: 28px;
+      border: 3px solid #333;
+      border-top-color: #c9a96e;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #loading-text {
+      font-size: 0.82rem;
+      color: #555;
+      font-family: sans-serif;
+    }
+
+    /* ── VN Container ─────────────────────────────── */
+    #vn-container {
+      position: relative;
+      width: 100%; height: 100%;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    /* ── Background ───────────────────────────────── */
+    #bg-layer {
+      position: absolute; inset: 0;
+      background-size: cover;
+      background-position: center;
+      background-color: #111;
+      transition: opacity 0.5s ease;
+    }
+
+    /* ── Character Layer ──────────────────────────── */
+    #char-layer {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-around;
+      pointer-events: none;
+    }
+
+    .char-slot {
+      flex: 1;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      height: 100%;
+    }
+
+    .char-slot img {
+      max-height: 85vh;
+      max-width: 95%;
+      object-fit: contain;
+      object-position: bottom;
+      transition: filter 0.35s ease, transform 0.35s ease;
+    }
+
+    .char-slot img.speaking {
+      filter: brightness(1.0);
+      transform: scale(1.02) translateY(-4px);
+    }
+    .char-slot img.silent {
+      filter: brightness(0.5) saturate(0.6);
+    }
+
+    /* ── Dialogue Box ─────────────────────────────── */
+    #dialogue-box {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      min-height: 210px;
+      padding: 28px 72px 36px;
+      background: linear-gradient(
+        to top,
+        rgba(0, 0, 0, 0.93) 0%,
+        rgba(0, 0, 0, 0.87) 60%,
+        rgba(0, 0, 0, 0.0) 100%
+      );
+      display: none;
+    }
+
+    #speaker-name {
+      display: none;
+      font-family: 'Georgia', serif;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #c9a96e;
+      letter-spacing: 0.08em;
+      margin-bottom: 12px;
+      text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9);
+    }
+
+    #dialogue-text {
+      font-family: 'Georgia', 'Noto Serif KR', serif;
+      font-size: 1rem;
+      color: #f0ece4;
+      line-height: 1.8;
+      letter-spacing: 0.04em;
+      text-shadow: 1px 1px 4px rgba(0, 0, 0, 0.95);
+      min-height: 3.6em;
+    }
+
+    #advance-hint {
+      position: absolute;
+      bottom: 18px; right: 48px;
+      font-size: 0.7rem;
+      color: #888;
+      letter-spacing: 0.1em;
+      opacity: 0;
+      animation: blink 1.4s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.15; }
+    }
+
+    /* ── End Screen ───────────────────────────────── */
+    #end-screen {
+      position: absolute; inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.65);
+      color: #c9a96e;
+      font-family: 'Georgia', serif;
+      font-size: 2.2rem;
+      letter-spacing: 0.35em;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Loading -->
+  <div id="loading-overlay">
+    <div class="loading-logo">N2VN</div>
+    <div class="loading-spinner"></div>
+    <div id="loading-text">소설 데이터를 불러오는 중...</div>
+  </div>
+
+  <!-- Player -->
+  <div id="vn-container">
+    <div id="bg-layer"></div>
+
+    <div id="char-layer">
+      <div class="char-slot" id="char-left"></div>
+      <div class="char-slot" id="char-center"></div>
+      <div class="char-slot" id="char-right"></div>
+    </div>
+
+    <div id="dialogue-box">
+      <div id="speaker-name"></div>
+      <div id="dialogue-text"></div>
+      <div id="advance-hint">▼ CLICK</div>
+    </div>
+
+    <div id="end-screen">— 완 —</div>
+  </div>
+
+  <script src="player.js"></script>
+</body>
+</html>

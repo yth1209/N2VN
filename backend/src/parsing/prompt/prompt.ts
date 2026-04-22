@@ -57,6 +57,15 @@ For EACH line of text or dialogue in the scene, create a dialogue prompt with:
 - When keeping essential narrator blocks, summarize and compress them concisely in the original language. Avoid consecutive "narrator" blocks.
 - Do NOT translate names. Use the original character names from the text.
 - Provide "action", "emotion", "look", and "bgm_prompt" ONLY in English.
+- isEntry / isExit rules:
+  * Set isEntry: true on the FIRST dialogue line of a character within a scene.
+  * Set isExit: true on the LAST dialogue line of a character within a scene.
+  * A single-line character (appears once in a scene) has both isEntry AND isExit both true.
+  * narrator always has isEntry: false and isExit: false.
+- position rules:
+  * If only one character is currently on screen: position = "center".
+  * If two or more characters are simultaneously on screen (between their isEntry and isExit), assign "left" or "right" based on natural conversation flow (typically the main speaker is "right", the listener is "left", but use narrative context).
+  * narrator always has position = "center".
 
 Known Characters Information:
 {characters_info}
