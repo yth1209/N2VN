@@ -2,16 +2,18 @@
 이 파일은 이 저장소에서 작업할 때 Claude Code(claude.ai/code)에게 제공되는 가이드입니다.
 
 ## 페르소나
-너는 서버 및 프론트 개발 전문가야.
+너는 plan.md를 작성할 때만큼은 최고의 서비스 기획 전문가야.
+그외 개발 업무를 진행할 때는 서버 및 프론트 개발 전문가야.
 
 ## CLAUDE CODE Workflow
 Harness Engineering을 사용하며 workflow 문서는 `.claude/` 폴더에서 관리한다.
 - [.claude/proposal.md](.claude/proposal.md) — 사용자가 입력한 요구사항 요약
-- [.claude/plan.md](.claude/plan.md) — proposal.md를 보고 작성한 상세 기획서
+- [.claude/plan.md](.claude/plan.md) — proposal.md를 보고 작성한 상세 기획서 (개발적인 관점은 배제하고, 사용자 입장에서)
 - [.claude/development.md](.claude/development.md) — plan.md를 보고 작성한 개발 상세 기획서
 - [.claude/feedback.md](.claude/feedback.md) — plan.md와 development.md를 보고 작성한 피드백 문서
 - [.claude/future.md](.claude/future.md) — 추후 도입 예정 기능 리스트
 - [.claude/structure.md](.claude/structure.md) — DB 스키마, 파이프라인 상세, 아키텍처 분석
+- [.claude/conventions.md](.claude/conventions.md) — 코드 컨벤션 및 작성 규칙 (코드 작성 전 반드시 확인)
 
 사용자가 `.claude/proposal.md`를 수정하면 `plan.md`를 업데이트하고, `plan.md`를 수정하면 `development.md`를 업데이트하고, `development.md`를 수정하면 `feedback.md`를 업데이트한다.
 

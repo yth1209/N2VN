@@ -1,678 +1,1253 @@
-# N2VN Development — 구현 상세 명세
+# N2VN Development Spec
 
-> **기반 문서**: [plan.md](plan.md) · [structure.md](structure.md)  
-> **목표**: Monogatari 비주얼 노벨 플레이어 통합
-
----
-
-## 목차
-
-1. [Backend — sceneSchema 수정 (`isEntry`, `isExit`, `position`)](#1-backend--sceneschema-수정)
-2. [Backend — scene_prompt 수정](#2-backend--scene_prompt-수정)
-3. [Backend — `GET /novels/:id/vn-script` 엔드포인트](#3-backend--get-novelsidvn-script-엔드포인트)
-4. [Backend — scenes.json → Monogatari 변환 로직](#4-backend--scenesjson--monogatari-변환-로직)
-5. [Frontend — `vn.html` 생성](#5-frontend--vnhtml-생성)
-6. [Frontend — `vn.js` 생성](#6-frontend--vnjs-생성)
-7. [Frontend — `index.html` Visual Novel 탭 추가](#7-frontend--indexhtml-visual-novel-탭-추가)
-8. [Frontend — `app.js` postMessage 연동](#8-frontend--appjs-postmessage-연동)
+> plan.md 기반 개발 상세 기획서. 구현 관점의 모든 세부 사항을 포함한다.
+> 기존 코드베이스는 [structure.md](structure.md) 참조.
 
 ---
 
-## 1. Backend — sceneSchema 수정
+## 0. 변경 범위 개요
 
-**파일**: `backend/src/parsing/novel-parsing.service.ts`  
-**위치**: `extractScenesMetadata()` 내 `sceneSchema` 정의부 (현재 162~170 라인)
-
-현재 `dialogues` 배열의 각 항목에 `isEntry`, `isExit`, `position` 3개 필드를 추가한다.
-
-### 변경 전 (현재 코드)
-
-```typescript
-dialogues: z.array(z.object({
-  characterId: z.string()...,
-  dialog: z.string()...,
-  action: z.enum(['IDLE', 'ATTACK', 'SHAKE'])...,
-  emotion: z.nativeEnum(Emotion)...,
-  look: z.string()...
-}))
-```
-
-### 변경 후
-
-```typescript
-dialogues: z.array(z.object({
-  characterId: z.string().describe("화자의 고유 ID (characters_info 참고. 예: 1_char_1). 나레이션인 경우 'narrator'"),
-  dialog: z.string().describe("대사 또는 서술 내용 문장 원문 (번역 금지)"),
-  action: z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe("화자의 행동/동작 (반드시 다음 중 한 가지만 선택: IDLE, ATTACK, SHAKE)"),
-  emotion: z.nativeEnum(Emotion).describe(`화자의 감정 (반드시 다음 중 한 가지만 선택: ${Object.values(Emotion).join(', ')})`),
-  look: z.string().describe("화자의 표정이나 드러나는 외모를 묘사하는 짧은 영어 구문 (알 수 없으면 'unknown')"),
-  isEntry: z.boolean().describe("이 대사가 해당 캐릭터의 씬 내 첫 번째 등장인 경우 true. narrator는 항상 false"),
-  isExit: z.boolean().describe("이 대사가 해당 캐릭터가 씬에서 마지막으로 말하는 대사인 경우 true. narrator는 항상 false"),
-  position: z.enum(['left', 'center', 'right']).describe("캐릭터의 화면 위치. 캐릭터 혼자 화면에 있으면 center. 두 명 이상이 동시에 화면에 있으면 left/right로 자연스럽게 배치. narrator는 center"),
-})).describe("이 씬에 포함되는 모든 대사와 나레이션을 순서대로 담은 배열")
-```
-
-> **주의**: `sceneSchema` 변경 후 기존 S3의 `scenes.json`은 새 필드가 없는 구버전이므로, 변환 로직에서 `isEntry`/`isExit`/`position`이 없는 경우를 방어적으로 처리해야 한다 (아래 §4 참조).
-
----
-
-## 2. Backend — scene_prompt 수정
-
-**파일**: `backend/src/parsing/prompt/prompt.ts`  
-**위치**: `scene_prompt` 상수의 `[CRITICAL INSTRUCTIONS]` 블록 하단
-
-### 추가할 지시사항 (기존 마지막 줄 아래에 삽입)
-
-```
-- isEntry / isExit rules:
-  * Set isEntry: true on the FIRST dialogue line of a character within a scene.
-  * Set isExit: true on the LAST dialogue line of a character within a scene.
-  * A single-line character (appears once in a scene) has both isEntry AND isExit both true.
-  * narrator always has isEntry: false and isExit: false.
-- position rules:
-  * If only one character is currently on screen: position = "center".
-  * If two or more characters are simultaneously on screen (between their isEntry and isExit), assign "left" or "right" based on natural conversation flow (typically the main speaker is "right", the listener is "left", but use narrative context).
-  * narrator always has position = "center".
-```
-
-### 최종 `scene_prompt` 끝부분 형태
-
-```typescript
-export const scene_prompt = `
-...
-[CRITICAL INSTRUCTIONS]
-- For character dialogues: Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field.
-- For narrations/descriptions (characterId: "narrator"): EXCLUDE purely visual descriptions...
-- Do NOT translate names. Use the original character names from the text.
-- Provide "action", "emotion", "look", and "bgm_prompt" ONLY in English.
-- isEntry / isExit rules:
-  * Set isEntry: true on the FIRST dialogue line of a character within a scene.
-  * Set isExit: true on the LAST dialogue line of a character within a scene.
-  * A single-line character (appears once in a scene) has both isEntry AND isExit both true.
-  * narrator always has isEntry: false and isExit: false.
-- position rules:
-  * If only one character is currently on screen: position = "center".
-  * If two or more characters are simultaneously on screen (between their isEntry and isExit), assign "left" or "right" based on natural conversation flow.
-  * narrator always has position = "center".
-...
-"""`;
-```
-
----
-
-## 3. Backend — `GET /novels/:id/vn-script` 엔드포인트
-
-### 3-1. `novel.controller.ts` — 라우트 등록
-
-**파일**: `backend/src/novel/novel.controller.ts`
-
-기존 `@Get(':id/assets')` 아래에 추가:
-
-```typescript
-@Get(':id/vn-script')
-async getVnScript(@Param('id') id: string) {
-  const data = await this.novelService.getVnScript(Number(id));
-  return {
-    success: true,
-    data,
-  };
-}
-```
-
-### 3-2. `novel.service.ts` — `getVnScript()` 메서드
-
-**파일**: `backend/src/novel/novel.service.ts`
-
-`NovelService`에 `S3HelperService` 의존성을 추가하고, `getVnScript()` 메서드를 구현한다.
-
-#### 생성자 수정
-
-현재 생성자:
-```typescript
-constructor(
-  private readonly repo: RepositoryProvider,
-  private readonly configService: ConfigService,
-) {}
-```
-
-변경 후:
-```typescript
-constructor(
-  private readonly repo: RepositoryProvider,
-  private readonly configService: ConfigService,
-  private readonly s3Helper: S3HelperService,
-) {}
-```
-
-`S3HelperService` 및 TypeORM `In` import 추가:
-```typescript
-import { S3HelperService } from '../common/s3-helper.service';
-import { In } from 'typeorm';
-```
-
-#### `getVnScript()` 메서드 전체 구현
-
-```typescript
-async getVnScript(id: number) {
-  const novel = await this.repo.novel.findOne({ where: { id } });
-  if (!novel) throw new HttpException('Novel not found', HttpStatus.NOT_FOUND);
-
-  const bucket = this.configService.get<string>('AWS_S3_BUCKET_NAME');
-  const region = this.configService.get<string>('AWS_REGION');
-  const baseUrl = `https://${bucket}.s3.${region}.amazonaws.com`;
-
-  // 1. S3에서 scenes.json 읽기
-  const scenesData = await this.s3Helper.readJson(`${id}/scenes.json`);
-
-  // 2. DB에서 캐릭터, 배경, 캐릭터 이미지 조회 (단일 쿼리로 N+1 방지)
-  const characters = await this.repo.character.find({ where: { novelId: id } });
-  const backgrounds = await this.repo.background.find({ where: { novelId: id } });
-
-  const charIds = characters.map(c => c.id);
-  const allImages = charIds.length
-    ? await this.repo.characterImg.find({ where: { characterId: In(charIds) } })
-    : [];
-
-  // characterId 기준으로 그룹화
-  const imagesByChar = new Map<string, typeof allImages>();
-  for (const img of allImages) {
-    if (!imagesByChar.has(img.characterId)) imagesByChar.set(img.characterId, []);
-    imagesByChar.get(img.characterId)!.push(img);
-  }
-
-  // 3. 캐릭터별 스프라이트 맵 구성 (emotion -> NOBG URL)
-  const characterMap: Record<string, { name: string; sprites: Record<string, string> }> = {};
-  for (const char of characters) {
-    const images = imagesByChar.get(char.id) ?? [];
-    const sprites: Record<string, string> = {};
-    for (const img of images) {
-      if (img.nobgGenId) {
-        // NOBG 이미지 우선 사용
-        sprites[img.emotion] = `${baseUrl}/${id}/characters/${char.id}_${img.emotion}_NOBG.png`;
-      } else if (img.genId) {
-        // NOBG 없으면 원본 이미지로 폴백
-        sprites[img.emotion] = `${baseUrl}/${id}/characters/${char.id}_${img.emotion}.png`;
-      }
-    }
-    characterMap[char.id] = { name: char.name, sprites };
-  }
-
-  // 4. 배경 맵 구성 (bgId -> URL)
-  const sceneMap: Record<string, string> = {};
-  for (const bg of backgrounds) {
-    if (bg.genId) {
-      sceneMap[bg.id] = `${baseUrl}/${id}/backgrounds/${bg.id}.png`;
-    }
-  }
-
-  // 5. scenes.json -> Monogatari script 변환
-  const script = buildMonogatariScript(scenesData.scenes, characterMap);
-
-  return { characters: characterMap, scenes: sceneMap, script };
-}
-```
-
-### 3-3. `novel.module.ts` — S3HelperService 추가 확인
-
-`novel.module.ts`에서 `S3HelperService`가 providers에 포함되어 있는지 확인하고 없으면 추가한다:
-
-```typescript
-import { S3HelperService } from '../common/s3-helper.service';
-
-@Module({
-  imports: [TypeOrmModule.forFeature([Novel, Character, CharacterImg, Background])],
-  controllers: [NovelController],
-  providers: [NovelService, RepositoryProvider, S3HelperService],
-})
-export class NovelModule {}
-```
-
----
-
-## 4. Backend — scenes.json → Monogatari 변환 로직
-
-**파일**: `backend/src/novel/novel.service.ts` (같은 파일 내 독립 함수로 배치, 클래스 외부)
-
-### `buildMonogatariScript()` 함수 전체 구현
-
-```typescript
-type VnCharacterMap = Record<string, { name: string; sprites: Record<string, string> }>;
-type MonogatariCommand = string | Record<string, string>;
-
-function buildMonogatariScript(
-  scenes: any[],
-  characterMap: VnCharacterMap,
-): MonogatariCommand[] {
-  const script: MonogatariCommand[] = [];
-
-  for (const scene of scenes) {
-    // 씬 시작: 배경 전환
-    script.push(`show scene ${scene.backgroundId} with fade`);
-
-    // 현재 씬에서 화면에 있는 캐릭터 추적 (charId -> { emotion, position })
-    const onScreen = new Map<string, { emotion: string; position: string }>();
-
-    for (const dialogue of scene.dialogues) {
-      const { characterId, dialog, emotion, isEntry, isExit, position } = dialogue;
-
-      // isEntry/isExit/position 방어 처리 (구버전 scenes.json 대응)
-      const entry = isEntry    ?? false;
-      const exit  = isExit     ?? false;
-      const pos   = position   ?? 'center';
-      const emo   = emotion    ?? 'DEFAULT';
-
-      if (characterId === 'narrator' || characterId === 'unknown') {
-        // 나레이션: 문자열 형태로 추가
-        script.push(dialog);
-        continue;
-      }
-
-      const charMeta = characterMap[characterId];
-      const charName = charMeta?.name ?? characterId;
-
-      // 캐릭터 첫 등장 (show character)
-      if (entry) {
-        script.push(`show character ${characterId} ${emo} ${pos}`);
-        onScreen.set(characterId, { emotion: emo, position: pos });
-      } else if (onScreen.has(characterId)) {
-        // 동일 씬 내 감정 또는 위치가 실제로 바뀐 경우에만 재렌더링
-        // (변화 없이 매 대사마다 show를 반복하면 Monogatari에서 불필요한 깜빡임 발생)
-        const prev = onScreen.get(characterId)!;
-        if (prev.emotion !== emo || prev.position !== pos) {
-          script.push(`show character ${characterId} ${emo} ${pos}`);
-          onScreen.set(characterId, { emotion: emo, position: pos });
-        }
-      }
-
-      // 대사
-      script.push({ [charName]: dialog });
-
-      // 캐릭터 퇴장 (hide character)
-      if (exit) {
-        script.push(`hide character ${characterId}`);
-        onScreen.delete(characterId);
-      }
-    }
-
-    // 씬 종료 시 아직 화면에 남아있는 캐릭터 정리 (isExit 누락 방어)
-    for (const charId of onScreen.keys()) {
-      script.push(`hide character ${charId}`);
-    }
-    onScreen.clear();
-  }
-
-  script.push('end');
-  return script;
-}
-```
-
-### 변환 규칙 요약
-
-| 조건 | 생성되는 명령 | 예시 |
+| 영역 | 작업 유형 | 요약 |
 |---|---|---|
-| 씬 시작 | `show scene {bgId} with fade` | `show scene 1_bg_1 with fade` |
-| BGM | ~~`play music {bgmId}`~~ | **미구현** — BGM 생성 파이프라인 미완성으로 이번 버전 제외 |
-| `isEntry: true` (첫 등장) | `show character {id} {emotion} {pos}` → 대사 | `show character 1_char_1 DEFAULT center` |
-| 동일 씬 내 감정/위치 **실제 변화** 시 | `show character {id} {emotion} {pos}` → 대사 | `show character 1_char_1 SMILE right` |
-| `isExit: true` (마지막) | 대사 → `hide character {id}` | `hide character 1_char_1` |
-| narrator / unknown | `'{dialog}'` 문자열 | `'밤이 깊어갔다.'` |
-| 캐릭터 대사 | `{ '{name}': '{dialog}' }` | `{ '백무진': '흥!' }` |
-| 씬 종료 후 화면 잔류 캐릭터 | `hide character {id}` | - |
-| 전체 마지막 | `'end'` | - |
+| DB / TypeORM | 리네임 + 신규 추가 | `novel` → `series`, `episode` + `user` 신규, 마이그레이션 도입 |
+| 공통 인프라 | 수정 | `RepositoryProvider` 확장, `S3HelperService` 키 경로 변경 |
+| 인증 | 신규 | `AuthModule` (JWT, Passport, bcrypt) |
+| Series API | 리팩토링 | `NovelModule` → `SeriesModule` |
+| Episode API | 신규 | `EpisodeModule` + `EpisodePipelineService` |
+| Parsing | 리팩토링 | `novelId` → `seriesId`, 병합 전략 프롬프트 변경 |
+| Image | 리팩토링 | S3 키 경로 변경, `novelId` → `seriesId` |
+| Frontend | 전면 재작성 | index / series / mine / player 분리 |
 
-### 반환 JSON 구조 예시
+---
+
+## 0.5 코드 컨벤션 참조
+
+> 코드 작성 규칙(DTO 패턴, 응답 래퍼 등)은 **[conventions.md](conventions.md)** 에서 관리한다.
+
+---
+
+## 1. 백엔드 구현
+
+### 1.1 TypeORM 마이그레이션 도입
+
+**`app.module.ts` TypeORM 설정 변경:**
+
+```typescript
+TypeOrmModule.forRoot({
+  // ...
+  synchronize: false,          // 기존 true → false 변경
+  migrations: ['dist/migrations/*.js'],
+  migrationsRun: true,
+})
+```
+
+**마이그레이션 파일 생성 순서:**
+
+1. `CreateUserTable` — `user` 테이블 신규 생성
+2. `RenameNovelToSeries` — `novel` → `series` 테이블 리네임, 컬럼 변경
+3. `CreateEpisodeTable` — `episode` 테이블 신규 생성
+4. `CreateEpisodePipelineStepTable` — `episode_pipeline_step` 테이블 신규 생성
+5. `UpdateCharacterAndBackground` — `novelId` → `seriesId`, PK를 UUID로 변경
+6. `UpdateCharacterImgFK` — `characterId` FK 연결 재정립
+
+> 마이그레이션은 `typeorm migration:generate`, `migration:run` CLI로 관리.
+
+---
+
+### 1.2 엔티티 정의
+
+#### `src/entities/user.entity.ts` (신규)
+
+```typescript
+@Entity('user')
+export class User {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ unique: true, length: 50 })
+  loginId: string;
+
+  @Column({ unique: true, length: 255 })
+  email: string;
+
+  @Column({ length: 255 })
+  password: string;           // bcrypt 해시
+
+  @Column({ length: 100 })
+  nickname: string;
+
+  @CreateDateColumn()
+  createdAt: Date;
+
+  @OneToMany(() => Series, (s) => s.author)
+  series: Series[];
+}
+```
+
+#### `src/entities/series.entity.ts` (기존 `novel.entity.ts` 대체)
+
+```typescript
+@Entity('series')
+export class Series {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ length: 255 })
+  title: string;
+
+  @Column({ type: 'text', nullable: true })
+  description: string;
+
+  @Column()
+  authorId: string;
+
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'authorId' })
+  author: User;
+
+  @Column({ length: 100, nullable: true })
+  characterStyleKey: string;
+
+  @Column({ type: 'text', nullable: true })
+  characterArtStyle: string;
+
+  @Column({ length: 100, nullable: true })
+  backgroundStyleKey: string;
+
+  @Column({ type: 'text', nullable: true })
+  backgroundArtStyle: string;
+
+  @Column({ nullable: true })
+  latestEpisodeAt: Date;
+
+  @CreateDateColumn()
+  createdAt: Date;
+
+  @OneToMany(() => Episode, (e) => e.series)
+  episodes: Episode[];
+
+  @OneToMany(() => Character, (c) => c.series)
+  characters: Character[];
+
+  @OneToMany(() => Background, (b) => b.series)
+  backgrounds: Background[];
+}
+```
+
+#### `src/entities/episode.entity.ts` (신규)
+
+```typescript
+export enum EpisodeStatus {
+  PENDING    = 'PENDING',
+  PROCESSING = 'PROCESSING',
+  DONE       = 'DONE',
+  FAILED     = 'FAILED',
+}
+
+@Entity('episode')
+@Unique(['seriesId', 'episodeNumber'])
+export class Episode {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column()
+  seriesId: string;
+
+  @ManyToOne(() => Series, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'seriesId' })
+  series: Series;
+
+  @Column()
+  episodeNumber: number;
+
+  @Column({ length: 255 })
+  title: string;
+
+  @Column({ type: 'enum', enum: EpisodeStatus, default: EpisodeStatus.PENDING })
+  status: EpisodeStatus;
+
+  @Column({ type: 'text', nullable: true })
+  errorMessage: string;
+
+  @CreateDateColumn()
+  createdAt: Date;
+
+  @OneToMany(() => EpisodePipelineStep, (s) => s.episode, { cascade: true })
+  pipelineSteps: EpisodePipelineStep[];
+}
+```
+
+#### `src/entities/episode-pipeline-step.entity.ts` (신규)
+
+5단계 진행도를 episode와 1:N 관계의 별도 테이블로 관리한다.
+episode 생성 시 5개 row를 일괄 INSERT하고, 각 단계 실행 전후에 해당 row를 UPDATE한다.
+
+```typescript
+export enum StepKey {
+  PARSE_CHARACTERS           = 'parseCharacters',
+  PARSE_BACKGROUNDS          = 'parseBackgrounds',
+  PARSE_SCENES               = 'parseScenes',
+  GENERATE_CHARACTER_IMAGES  = 'generateCharacterImages',
+  GENERATE_BACKGROUND_IMAGES = 'generateBackgroundImages',
+}
+
+export const STEP_ORDER: StepKey[] = [
+  StepKey.PARSE_CHARACTERS,
+  StepKey.PARSE_BACKGROUNDS,
+  StepKey.PARSE_SCENES,
+  StepKey.GENERATE_CHARACTER_IMAGES,
+  StepKey.GENERATE_BACKGROUND_IMAGES,
+];
+
+export enum StepStatus {
+  PENDING    = 'PENDING',
+  PROCESSING = 'PROCESSING',
+  DONE       = 'DONE',
+  FAILED     = 'FAILED',
+}
+
+@Entity('episode_pipeline_step')
+@Unique(['episodeId', 'stepKey'])   // episode 당 stepKey는 유일
+export class EpisodePipelineStep {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column()
+  episodeId: string;
+
+  @ManyToOne(() => Episode, (e) => e.pipelineSteps, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'episodeId' })
+  episode: Episode;
+
+  @Column({ type: 'enum', enum: StepKey })
+  stepKey: StepKey;
+
+  @Column({ type: 'enum', enum: StepStatus, default: StepStatus.PENDING })
+  status: StepStatus;
+
+  @Column({ type: 'text', nullable: true })
+  errorMessage: string;   // 해당 단계 실패 시 오류 메시지
+
+  @Column({ nullable: true })
+  startedAt: Date;
+
+  @Column({ nullable: true })
+  finishedAt: Date;
+}
+```
+
+#### `src/entities/character.entity.ts` (수정)
+
+- `id`: `@PrimaryColumn()` 수동 패턴 → `@PrimaryGeneratedColumn('uuid')`
+- `novelId: number` → `seriesId: string`
+- FK: `novel.id` → `series.id`
+
+#### `src/entities/background.entity.ts` (수정)
+
+- `id`: `@PrimaryColumn()` → `@PrimaryGeneratedColumn('uuid')`
+- `novelId: number` → `seriesId: string`
+- FK: `novel.id` → `series.id`
+
+---
+
+### 1.3 공통 인프라 변경
+
+#### `src/common/repository.provider.ts` (확장)
+
+```typescript
+@Injectable()
+export class RepositoryProvider {
+  constructor(
+    @InjectRepository(User)                 public readonly user:             Repository<User>,
+    @InjectRepository(Series)               public readonly series:           Repository<Series>,
+    @InjectRepository(Episode)              public readonly episode:          Repository<Episode>,
+    @InjectRepository(EpisodePipelineStep)  public readonly pipelineStep:     Repository<EpisodePipelineStep>,
+    @InjectRepository(Character)            public readonly character:        Repository<Character>,
+    @InjectRepository(CharacterImg)         public readonly characterImg:     Repository<CharacterImg>,
+    @InjectRepository(Background)           public readonly background:       Repository<Background>,
+  ) {}
+}
+```
+
+#### `src/common/s3-helper.service.ts` — S3 키 경로 변경
+
+기존 `{novelId}/...` → `series/{seriesId}/...` 패턴으로 변경.
+
+```typescript
+// 업로드 키 예시
+`series/${seriesId}/episodes/${episodeNumber}/novel.txt`
+`series/${seriesId}/episodes/${episodeNumber}/scenes.json`
+`series/${seriesId}/characters/${charId}_${emotion}.png`
+`series/${seriesId}/characters/${charId}_${emotion}_NOBG.png`
+`series/${seriesId}/backgrounds/${bgId}.png`
+```
+
+`uploadText(key: string, text: string): Promise<void>` 메서드 추가:
+- `ContentType: 'text/plain'`, SSE-S3 암호화 적용.
+
+---
+
+### 1.4 인증 모듈 (`src/auth/`)
+
+**파일 구조:**
+```
+src/auth/
+├── auth.module.ts
+├── auth.controller.ts
+├── auth.service.ts
+├── jwt.strategy.ts
+├── jwt-auth.guard.ts
+└── dto/
+    ├── register.dto.ts
+    └── login.dto.ts
+```
+
+#### `auth.service.ts`
+
+| 메서드 | 구현 상세 |
+|---|---|
+| `register(dto)` | loginId/email UNIQUE 확인 → `bcrypt.hash(password, 10)` → INSERT → `{ id, loginId, nickname }` 반환 |
+| `login(dto)` | `loginId`로 user 조회 → `bcrypt.compare` → JWT 서명 → `{ accessToken }` 반환 |
+| `getMe(userId)` | user 조회 → `{ id, loginId, email, nickname, createdAt }` 반환 |
+
+#### `jwt.strategy.ts`
+
+```typescript
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor() {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      secretOrKey: process.env.JWT_SECRET,
+    });
+  }
+  validate(payload: { sub: string }) {
+    return { id: payload.sub };   // req.user에 주입됨
+  }
+}
+```
+
+- `JWT_SECRET`: `.env`에 추가, 만료 `24h`
+
+#### `auth.controller.ts`
+
+```typescript
+POST /auth/register  -> authService.register(dto)
+POST /auth/login     -> authService.login(dto)
+GET  /auth/me        -> @UseGuards(JwtAuthGuard) -> authService.getMe(req.user.id)
+```
+
+#### `register.dto.ts`
+
+```typescript
+class RegisterDto {
+  @IsString() @Length(3, 50) @Matches(/^[a-z0-9_]+$/)
+  loginId: string;
+
+  @IsEmail()
+  email: string;
+
+  @IsString() @MinLength(8)
+  password: string;
+
+  @IsString() @Length(2, 50)
+  nickname: string;
+}
+```
+
+---
+
+### 1.5 Series 모듈 (`src/series/`)
+
+**기존 `novel/` 디렉토리 → `series/`로 이름 변경 및 재작성.**
+
+#### API 엔드포인트
+
+```typescript
+GET    /series            -> getSeriesList()           // 공개, latestEpisodeAt DESC
+GET    /series/mine       -> @Guard -> getMySeries()   // 인증 필요
+POST   /series            -> @Guard -> createSeries()  // 인증 필요
+GET    /series/:id        -> getSeriesDetail()         // 공개
+GET    /series/:id/assets -> getSeriesAssets()         // 공개
+```
+
+#### `getSeriesList()` 구현
+
+```typescript
+const list = await this.repo.series.find({
+  order: { latestEpisodeAt: 'DESC' },
+  relations: ['author', 'episodes'],
+});
+// 반환: id, title, description, authorNickname, latestEpisodeAt, episodeCount, thumbnailUrl
+// thumbnailUrl: characters 중 첫 번째 캐릭터의 DEFAULT NOBG 이미지 URL
+```
+
+#### `getSeriesDetail()` 구현
+
+```typescript
+// series + episodes + author 조인
+// episodes: episodeNumber ASC 정렬
+// 반환: series 메타 + 회차 목록 (id, episodeNumber, title, status, createdAt)
+```
+
+#### `getSeriesAssets()` 구현
+
+```typescript
+// 기존 getNovelAssets() N+1 수정 버전
+// characters 조회 -> In(charIds)로 characterImgs 한 번에 조회
+// S3 URL 조합: https://{bucket}.s3.{region}.amazonaws.com/series/{seriesId}/characters/{charId}_{emotion}.png
+```
+
+---
+
+### 1.6 Episode 모듈 (`src/episode/`)
+
+**파일 구조:**
+```
+src/episode/
+├── episode.module.ts
+├── episode.controller.ts
+├── episode.service.ts
+├── episode-pipeline.service.ts
+└── dto/
+    └── create-episode.dto.ts
+```
+
+#### `episode.controller.ts` 엔드포인트
+
+```typescript
+POST   /series/:id/episodes              -> @Guard -> createEpisode()
+GET    /series/:id/episodes/:num         -> getEpisode()
+GET    /series/:id/episodes/:num/vn-script -> getVnScript()
+DELETE /series/:id/episodes/:num         -> @Guard -> deleteEpisode()
+```
+
+#### `createEpisode()` 구현 (`EpisodeService`)
+
+```typescript
+@UseInterceptors(FileInterceptor('file'))
+async createEpisode(
+  seriesId: string,
+  dto: CreateEpisodeDto,      // title: string
+  file: Express.Multer.File,  // .txt 파일
+  userId: string,
+) {
+  // 1. series 소유권 확인 (series.authorId === userId, 아니면 403)
+  // 2. PROCESSING 중인 episode 있으면 409 Conflict
+  // 3. 현재 MAX episodeNumber 조회 → +1
+  // 4. episode INSERT (status: PROCESSING)
+  // 5. episode_pipeline_step 5개 row 일괄 INSERT (STEP_ORDER 순서, 전부 status: PENDING)
+  // 6. S3 업로드: series/{seriesId}/episodes/{epNum}/novel.txt
+  // 7. pipeline.run(seriesId, episodeNumber) — fire-and-forget
+  // 8. episode 반환 (id, episodeNumber, title, status)
+}
+```
+
+#### `getEpisode()` 응답 포맷
+
+`GET /series/:id/episodes/:num` 응답에 `pipelineSteps` 배열 포함.
+`episode` + `episode_pipeline_step` LEFT JOIN으로 단일 쿼리 조회:
+
+```typescript
+this.repo.episode.findOne({
+  where: { seriesId, episodeNumber },
+  relations: ['pipelineSteps'],
+  order: { pipelineSteps: { stepKey: 'ASC' } },  // STEP_ORDER 순서 유지
+});
+```
+
+응답 포맷:
 
 ```json
 {
-  "characters": {
-    "1_char_1": {
-      "name": "백무진",
-      "sprites": {
-        "DEFAULT": "https://.../_DEFAULT_NOBG.png",
-        "SMILE":   "https://.../_SMILE_NOBG.png",
-        "ANGRY":   "https://.../_ANGRY_NOBG.png"
-      }
-    }
-  },
-  "scenes": {
-    "1_bg_1": "https://.../backgrounds/1_bg_1.png",
-    "1_bg_2": "https://.../backgrounds/1_bg_2.png"
-  },
-  "script": [
-    "show scene 1_bg_1 with fade",
-    "show character 1_char_1 DEFAULT center",
-    { "백무진": "어디 한 번 덤벼보거라." },
-    "show character 1_char_2 SERIOUS left",
-    "show character 1_char_1 SMILE right",
-    { "백무진": "흥." },
-    { "진소룡": "..." },
-    "hide character 1_char_1",
-    "hide character 1_char_2",
-    "end"
+  "id": "uuid",
+  "episodeNumber": 3,
+  "title": "3화 제목",
+  "status": "PROCESSING",
+  "errorMessage": null,
+  "createdAt": "2026-04-22T10:00:00.000Z",
+  "pipelineSteps": [
+    { "stepKey": "parseCharacters",          "status": "DONE",       "startedAt": "...", "finishedAt": "...", "errorMessage": null },
+    { "stepKey": "parseBackgrounds",         "status": "DONE",       "startedAt": "...", "finishedAt": "...", "errorMessage": null },
+    { "stepKey": "parseScenes",              "status": "PROCESSING", "startedAt": "...", "finishedAt": null,  "errorMessage": null },
+    { "stepKey": "generateCharacterImages",  "status": "PENDING",    "startedAt": null,  "finishedAt": null,  "errorMessage": null },
+    { "stepKey": "generateBackgroundImages", "status": "PENDING",    "startedAt": null,  "finishedAt": null,  "errorMessage": null }
   ]
 }
 ```
 
----
+#### `getVnScript()` 구현
 
-## 5. Frontend — `vn.html` 생성
-
-**파일**: `frontend/vn.html` (신규 생성)
-
-Monogatari v2를 CDN으로 로드하고, API 데이터를 동적으로 주입받아 플레이어를 초기화하는 단독 페이지.
-
-### Monogatari v2 CDN 주소
-
-```
-https://unpkg.com/@monogatari/core@2.0.0-alpha.10/dist/monogatari.min.js
-https://unpkg.com/@monogatari/core@2.0.0-alpha.10/dist/monogatari.css
+```typescript
+// 기존 /novels/:id/vn-script 로직을 episode 레벨로 이동
+// S3에서 series/{seriesId}/episodes/{epNum}/scenes.json 읽기
+// characters, character_imgs 조회 (In 단일 쿼리)
+// backgrounds 조회
+// buildVnScript(scenes, characterMap, sceneMap) 호출
+// 반환 포맷: 기존 { characters, scenes, script } 구조 그대로 유지
 ```
 
-> v2.0.0-alpha.10이 현재 가장 안정적인 alpha 버전. stable 출시 시 버전 고정값 변경 필요.
+#### `EpisodePipelineService` 구현
 
-### `vn.html` 전체 구조
+각 단계 실행 전후로 `episode_pipeline_step` 테이블의 해당 row를 UPDATE한다.
+단계 실패 시 해당 단계만 `FAILED`로 기록하고 파이프라인을 중단한다 (이후 단계는 `PENDING` 유지).
 
-```html
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>N2VN Player</title>
-  <link rel="stylesheet" href="https://unpkg.com/@monogatari/core@2.0.0-alpha.10/dist/monogatari.css">
-  <style>
-    html, body {
-      margin: 0; padding: 0;
-      width: 100%; height: 100%;
-      background: #000;
-      overflow: hidden;
-    }
-    #monogatari {
-      width: 100%;
-      height: 100%;
-    }
-    #loading-overlay {
-      position: fixed;
-      inset: 0;
-      background: #0d0d0d;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      color: #fff;
-      font-family: sans-serif;
-      z-index: 9999;
-    }
-    #loading-overlay.hidden { display: none; }
-    #loading-text { margin-top: 16px; font-size: 0.9rem; color: #888; }
-  </style>
-</head>
-<body>
-  <div id="loading-overlay">
-    <div style="font-size: 2rem;">⏳</div>
-    <div id="loading-text">소설 데이터를 불러오는 중...</div>
-  </div>
+```typescript
+async run(seriesId: string, episodeNumber: number): Promise<void> {
+  const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
 
-  <div id="monogatari">
-    <div data-ui="screen" data-screen="game"></div>
-  </div>
+  const steps: Array<{ key: StepKey; fn: () => Promise<void> }> = [
+    { key: StepKey.PARSE_CHARACTERS,           fn: () => this.parsingService.parseCharactersForEpisode(seriesId, episodeNumber) },
+    { key: StepKey.PARSE_BACKGROUNDS,          fn: () => this.parsingService.parseBackgroundsForEpisode(seriesId, episodeNumber) },
+    { key: StepKey.PARSE_SCENES,               fn: () => this.parsingService.parseScenesForEpisode(seriesId, episodeNumber) },
+    { key: StepKey.GENERATE_CHARACTER_IMAGES,  fn: () => this.imageService.generateCharacterImages(seriesId) },
+    { key: StepKey.GENERATE_BACKGROUND_IMAGES, fn: () => this.imageService.generateBackgroundImages(seriesId) },
+  ];
 
-  <script src="https://unpkg.com/@monogatari/core@2.0.0-alpha.10/dist/monogatari.min.js"></script>
-  <script src="vn.js"></script>
-</body>
-</html>
-```
-
----
-
-## 6. Frontend — `vn.js` 생성
-
-**파일**: `frontend/vn.js` (신규 생성)
-
-`postMessage`로 `novelId`를 수신한 뒤 `GET /novels/:id/vn-script`를 호출하고, 응답 데이터로 Monogatari를 초기화한다.
-
-### `vn.js` 전체 구현
-
-```javascript
-const BASE_URL = 'http://localhost:3000';
-
-// postMessage로 novelId 수신 대기
-window.addEventListener('message', async (event) => {
-  // origin 검증: 같은 출처에서 온 메시지만 처리
-  if (event.origin !== window.location.origin) return;
-
-  const novelId = event.data?.novelId;
-  if (!novelId) return;
-
-  const overlay = document.getElementById('loading-overlay');
-  const loadingText = document.getElementById('loading-text');
-
-  overlay.classList.remove('hidden');
-  loadingText.textContent = `소설 #${novelId} 데이터를 불러오는 중...`;
-
-  try {
-    const res = await fetch(`${BASE_URL}/novels/${novelId}/vn-script`);
-    const result = await res.json();
-
-    if (!result.success) {
-      loadingText.textContent = '데이터 로드 실패: ' + (result.message ?? 'Unknown error');
+  for (const step of steps) {
+    await this.updateStep(episode.id, step.key, StepStatus.PROCESSING, { startedAt: new Date() });
+    try {
+      await step.fn();
+      await this.updateStep(episode.id, step.key, StepStatus.DONE, { finishedAt: new Date() });
+    } catch (err) {
+      await this.updateStep(episode.id, step.key, StepStatus.FAILED, {
+        finishedAt: new Date(),
+        errorMessage: err.message,
+      });
+      await this.repo.episode.update(episode.id, {
+        status: EpisodeStatus.FAILED,
+        errorMessage: `[${step.key}] ${err.message}`,
+      });
       return;
     }
-
-    initMonogatari(result.data);
-  } catch (err) {
-    console.error('VN script fetch error:', err);
-    loadingText.textContent = '서버 연결 실패';
   }
+
+  await this.repo.episode.update(episode.id, { status: EpisodeStatus.DONE });
+  await this.repo.series.update(seriesId, { latestEpisodeAt: new Date() });
+}
+
+// episode_pipeline_step row 업데이트 헬퍼
+private async updateStep(
+  episodeId: string,
+  stepKey: StepKey,
+  status: StepStatus,
+  extra: Partial<EpisodePipelineStep> = {},
+): Promise<void> {
+  await this.repo.pipelineStep.update({ episodeId, stepKey }, { status, ...extra });
+}
+```
+
+---
+
+### 1.7 Parsing 모듈 리팩토링 (`src/parsing/`)
+
+기존 `POST /parsing/characters`, `POST /parsing/backgrounds`, `POST /parsing/scenes` 엔드포인트는 **외부 호출 가능하게 유지**한다.
+파이프라인 특정 단계가 FAILED 상태일 때 해당 단계만 단독으로 재실행할 수 있어야 하기 때문이다.
+
+**엔드포인트 변경 사항:**
+
+| Method | Path | Body | 설명 |
+|---|---|---|---|
+| `POST` | `/parsing/characters` | `{ seriesId, episodeNumber }` | 캐릭터 파싱 (단독 재실행 가능) |
+| `POST` | `/parsing/backgrounds` | `{ seriesId, episodeNumber }` | 배경 파싱 (단독 재실행 가능) |
+| `POST` | `/parsing/scenes` | `{ seriesId, episodeNumber }` | 씬 파싱 (단독 재실행 가능) |
+
+- 기존 `novelId` body 파라미터 → `seriesId + episodeNumber` 로 변경
+- `EpisodePipelineService`도 이 엔드포인트의 서비스 메서드를 그대로 호출하는 구조로 통일
+
+#### `parseCharactersForEpisode(seriesId, episodeNumber)` 변경점
+
+1. S3 경로: `series/{seriesId}/episodes/{episodeNumber}/novel.txt`
+2. **기존 캐릭터 목록 조회 → 프롬프트에 포함:**
+
+```typescript
+const existing = await this.repo.character.find({ where: { seriesId } });
+const existingStr = existing.map(c =>
+  `- ID: ${c.id}, Name: ${c.name}, Sex: ${c.sex}, Look: ${c.look}`
+).join('\n');
+```
+
+3. 프롬프트 변경: `existing_characters` 파라미터 추가, LLM 지시 추가
+4. LLM 응답: 신규 캐릭터만 포함 → UUID 신규 생성하여 INSERT (기존 캐릭터 건드리지 않음)
+5. series의 `characterStyleKey`, `characterArtStyle` 갱신 (최초 파싱 시에만 — null인 경우)
+
+#### `parseBackgroundsForEpisode(seriesId, episodeNumber)` 변경점
+
+- 동일 전략: `existing_backgrounds` 프롬프트 파라미터 추가
+- 신규 배경만 INSERT
+- `backgroundStyleKey`, `backgroundArtStyle` 갱신 (null인 경우)
+
+#### `parseScenesForEpisode(seriesId, episodeNumber)` 변경점
+
+1. S3 저장 경로: `series/{seriesId}/episodes/{episodeNumber}/scenes.json`
+2. `characters_info`에 기존 전체 캐릭터 (series 레벨) 전달
+3. `character_img` 플레이스홀더: `genId=null`인 경우에만 INSERT (중복 방지)
+
+---
+
+### 1.8 Image 모듈 리팩토링 (`src/image/`)
+
+- `novelId` → `seriesId` 파라미터 전환
+- S3 키 경로: `series/{seriesId}/characters/...`, `series/{seriesId}/backgrounds/...`
+- `generateCharacterImages(seriesId)`: `genId=null` 필터에서 `seriesId` 기준으로 조회
+- `generateBackgroundImages(seriesId)`: 동일
+
+**기존 버그 #2 수정 (`orWhere` 문제):**
+
+```typescript
+// 수정 전 (다른 seriesId의 DEFAULT 이미지 포함될 수 있음)
+.where('ci.genId IS NULL').orWhere('ci.emotion = :emotion')
+
+// 수정 후
+.where('c.seriesId = :seriesId', { seriesId })
+.andWhere('ci.genId IS NULL')
+```
+
+---
+
+### 1.9 AppModule 구성
+
+```typescript
+@Module({
+  imports: [
+    TypeOrmModule.forRoot({ ... }),
+    AuthModule,
+    SeriesModule,
+    EpisodeModule,
+    ParsingModule,
+    ImageModule,
+  ],
+})
+```
+
+- `NovelModule` 제거
+- `ParsingModule`, `ImageModule`은 `EpisodeModule`에 주입됨 (내부 전용 유지)
+
+---
+
+## 2. 프론트엔드 구현
+
+### 2.1 파일 구조
+
+```
+frontend/
+├── index.html          # 독자 메인 (작품 목록)
+├── index.js
+├── series.html         # 작품 상세 + 회차 목록
+├── series.js
+├── mine.html           # 작가 관리 화면
+├── mine.js
+├── player.html         # VN 플레이어 (iframe 단독)
+├── player.js           # VN 엔진 (기존 유지)
+├── auth.js             # 공통 인증 헬퍼 (JWT 관리)
+└── style.css
+```
+
+---
+
+### 2.2 공통 인증 헬퍼 (`auth.js`)
+
+```javascript
+const Auth = {
+  getToken: () => localStorage.getItem('token'),
+  setToken: (t) => localStorage.setItem('token', t),
+  removeToken: () => localStorage.removeItem('token'),
+  isLoggedIn: () => !!localStorage.getItem('token'),
+
+  // Authorization 헤더 포함 fetch 래퍼
+  authFetch: (url, options = {}) => fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${Auth.getToken()}`,
+      ...options.headers,
+    }
+  }),
+
+  // 헤더 UI 갱신 (로그인/로그아웃 버튼)
+  updateHeader: async () => { ... },
+
+  // 로그인 모달 표시
+  showLoginModal: () => { ... },
+  showRegisterModal: () => { ... },
+};
+```
+
+모든 페이지에서 `<script src="auth.js">` 로 공유.
+
+---
+
+### 2.3 독자 메인 (`index.html` / `index.js`)
+
+#### HTML 구조
+
+```html
+<header>
+  <h1>N2VN</h1>
+  <div id="auth-area"><!-- 로그인/로그아웃 버튼 --></div>
+</header>
+
+<div class="tab-bar">
+  <button data-tab="all" class="active">전체</button>
+  <button data-tab="recent">최신 업데이트</button>
+  <button data-tab="read">내가 읽은 작품</button>
+</div>
+
+<div id="series-grid" class="card-grid">
+  <!-- SeriesCard 반복 렌더링 -->
+</div>
+
+<!-- 로그인 모달 (auth.js 공통) -->
+<div id="login-modal" class="modal hidden"> ... </div>
+<div id="register-modal" class="modal hidden"> ... </div>
+```
+
+#### `index.js` 주요 로직
+
+```javascript
+// 초기화
+document.addEventListener('DOMContentLoaded', async () => {
+  await Auth.updateHeader();
+  await loadSeriesList();
+  setupTabs();
 });
 
-function initMonogatari({ characters, scenes, script }) {
-  const monogatari = Monogatari.default;
+// 작품 목록 조회
+async function loadSeriesList() {
+  const data = await fetch('/series').then(r => r.json());
+  allSeries = data.data;
+  renderGrid(getSortedFiltered(allSeries));
+}
 
-  // 캐릭터 등록
-  // sprites 값에 절대 URL이 있으므로 directory는 빈 문자열 사용
-  for (const [charId, charData] of Object.entries(characters)) {
-    monogatari.characters({
-      [charId]: {
-        name: charData.name,
-        sprites: charData.sprites,
-        directory: '',
-      }
-    });
-  }
-
-  // 배경 등록 (scene 명령에서 키로 참조됨)
-  monogatari.assets('scenes', scenes);
-
-  // 스크립트 등록
-  monogatari.script({ 'main': script });
-
-  // 엔진 설정
-  monogatari.settings({
-    'game-name': 'N2VN Visual Novel',
-    'engine-version': '2.0.0-alpha.10',
-    'force-load': false,
-    'skip-unseen': false,
+// 복합 정렬: 최근 읽은 작품 상위 → latestEpisodeAt DESC
+function getSortedFiltered(list) {
+  const history = getReadHistory();  // localStorage
+  return [...list].sort((a, b) => {
+    const aRead = history[a.id]?.lastReadAt ?? 0;
+    const bRead = history[b.id]?.lastReadAt ?? 0;
+    if (aRead !== bRead) return bRead - aRead;
+    return new Date(b.latestEpisodeAt) - new Date(a.latestEpisodeAt);
   });
+}
 
-  // 초기화 및 새 게임 시작
-  monogatari.init('#monogatari').then(() => {
-    document.getElementById('loading-overlay').classList.add('hidden');
-    monogatari.element().find('[data-action="new"]').trigger('click');
-  }).catch(err => {
-    console.error('Monogatari init error:', err);
-    document.getElementById('loading-text').textContent = '플레이어 초기화 실패';
-  });
+// 카드 렌더링
+function renderSeriesCard(series) {
+  return `
+    <div class="series-card" onclick="location.href='/series.html?id=${series.id}'">
+      <img src="${series.thumbnailUrl ?? '/default-thumb.png'}" alt="${series.title}">
+      <div class="card-info">
+        <h3>${series.title}</h3>
+        <span class="author">${series.authorNickname}</span>
+        <span class="episode-count">총 ${series.episodeCount}화</span>
+        <span class="latest">${formatDate(series.latestEpisodeAt)}</span>
+      </div>
+    </div>
+  `;
 }
 ```
 
-### 주의사항
-
-- Monogatari v2의 `sprites`에 절대 URL을 사용할 때 `directory: ''`로 설정해야 경로 중복 없이 그대로 사용된다. 실제 동작은 버전에 따라 다를 수 있으므로 테스트 필수.
-- `2.0.0-alpha.10`은 unstable 버전이므로 `Monogatari.default` 진입점, `monogatari.characters()` / `monogatari.assets()` / `monogatari.script()` 메서드 시그니처, `element().find().trigger()` 체이닝이 실제로 동작하는지 사전 검증이 필요하다. `vn.html`을 단독으로 열어 콘솔에서 `Monogatari.default` 구조를 먼저 확인한다.
-- 소설 재선택은 `app.js`에서 iframe을 `src` 재지정으로 리로드하는 방식으로 처리한다 (§8 변경사항 3 참조). `vn.js` 자체는 페이지 로드 시 최초 1회만 초기화된다고 가정하면 된다.
-
----
-
-## 7. Frontend — `index.html` Visual Novel 탭 추가
-
-**파일**: `frontend/index.html`
-
-### 변경사항 1 — 탭 추가 (28~31 라인 `<div class="tabs">` 내부)
-
-```html
-<!-- 변경 전 -->
-<div class="tabs">
-  <div class="tab active" data-tab="characters">Characters</div>
-  <div class="tab" data-tab="backgrounds">Backgrounds</div>
-</div>
-
-<!-- 변경 후 -->
-<div class="tabs">
-  <div class="tab active" data-tab="characters">Characters</div>
-  <div class="tab" data-tab="backgrounds">Backgrounds</div>
-  <div class="tab" data-tab="vn">Visual Novel</div>
-</div>
-```
-
-### 변경사항 2 — VN 뷰 컨테이너 추가 (`backgrounds-view` div 바로 아래)
-
-```html
-<!-- 기존 -->
-<div id="backgrounds-view" class="gallery-grid" style="display: none;">
-  <!-- Background cards will be loaded here -->
-</div>
-
-<!-- 추가 -->
-<div id="vn-view" style="display: none; width: 100%; height: 600px;">
-  <iframe
-    id="vn-iframe"
-    src="vn.html"
-    style="width: 100%; height: 100%; border: none; border-radius: 8px;"
-    allow="autoplay"
-  ></iframe>
-</div>
-```
-
-> iframe 높이 600px은 초기 기본값이며, CSS로 `content-viewer` 높이에 맞게 조정 가능하다.
-
----
-
-## 8. Frontend — `app.js` postMessage 연동
-
-**파일**: `frontend/app.js`
-
-### 변경사항 1 — 전역 변수에 VN 뷰 엘리먼트 추가 (상단 DOM Elements 섹션)
+#### 읽기 이력 로컬스토리지 구조
 
 ```javascript
-// 기존 (9 라인)
-const backgroundsViewEl = document.getElementById('backgrounds-view');
-
-// 추가
-const vnViewEl   = document.getElementById('vn-view');
-const vnIframeEl = document.getElementById('vn-iframe');
-```
-
-### 변경사항 2 — `setupEventListeners()` 탭 전환 로직 수정 (79~88 라인)
-
-```javascript
-// 변경 전
-if (activeTab === 'characters') {
-  charactersViewEl.style.display = 'grid';
-  backgroundsViewEl.style.display = 'none';
-} else {
-  charactersViewEl.style.display = 'none';
-  backgroundsViewEl.style.display = 'grid';
-}
-
-// 변경 후
-if (activeTab === 'characters') {
-  charactersViewEl.style.display = 'grid';  // 'block'이 아닌 'grid' 유지
-  backgroundsViewEl.style.display = 'none';
-  vnViewEl.style.display = 'none';
-} else if (activeTab === 'backgrounds') {
-  charactersViewEl.style.display = 'none';
-  backgroundsViewEl.style.display = 'grid';
-  vnViewEl.style.display = 'none';
-} else if (activeTab === 'vn') {
-  charactersViewEl.style.display = 'none';
-  backgroundsViewEl.style.display = 'none';
-  vnViewEl.style.display = 'block';
-  if (currentNovelId) {
-    sendNovelIdToVnPlayer(currentNovelId);
+// key: 'n2vn_read_history'
+// 값 예시:
+{
+  "{seriesId}": {
+    lastReadAt: 1713800000000,  // timestamp
+    readEpisodes: [1, 2, 3]     // 읽은 에피소드 번호 목록
   }
 }
 ```
 
-### 변경사항 3 — `sendNovelIdToVnPlayer()` 함수 추가
+---
 
-`setupEventListeners()` 함수 아래에 추가:
+### 2.4 작품 상세 (`series.html` / `series.js`)
+
+#### HTML 구조
+
+```html
+<header> ... </header>
+
+<div class="series-hero">
+  <img id="series-thumb" src="">
+  <div class="series-meta">
+    <h2 id="series-title"></h2>
+    <p id="series-author"></p>
+    <p id="series-description"></p>
+  </div>
+</div>
+
+<section class="episode-list">
+  <h3>회차 목록</h3>
+  <ul id="episode-ul">
+    <!-- EpisodeItem 반복 -->
+  </ul>
+</section>
+
+<!-- VN 플레이어 전체화면 모달 -->
+<div id="vn-modal" class="modal-fullscreen hidden">
+  <button id="vn-close-btn">✕</button>
+  <iframe id="vn-iframe" src="player.html" allow="autoplay"></iframe>
+</div>
+```
+
+#### `series.js` 주요 로직
 
 ```javascript
-function sendNovelIdToVnPlayer(novelId) {
-  // iframe을 리로드한 뒤 load 완료 후 postMessage 전송
-  // → Monogatari 인스턴스 재초기화 문제를 근본적으로 회피
-  vnIframeEl.src = 'vn.html';
-  vnIframeEl.onload = () => {
-    vnIframeEl.contentWindow.postMessage({ novelId }, window.location.origin);
-    vnIframeEl.onload = null;
+const seriesId = new URLSearchParams(location.search).get('id');
+
+async function init() {
+  await Auth.updateHeader();
+  const detail = await fetch(`/series/${seriesId}`).then(r => r.json());
+  renderSeriesHeader(detail.data);
+  renderEpisodeList(detail.data.episodes);
+}
+
+function renderEpisodeItem(ep) {
+  const isRead = isEpisodeRead(seriesId, ep.episodeNumber);
+  const isProcessing = ep.status === 'PROCESSING';
+  const isFailed = ep.status === 'FAILED';
+
+  return `
+    <li class="episode-item ${isRead ? 'read' : ''} ${isProcessing ? 'processing' : ''}"
+        data-ep="${ep.episodeNumber}"
+        onclick="${isProcessing || isFailed ? '' : `openVnPlayer(${ep.episodeNumber})`}">
+      <span class="ep-num">${ep.episodeNumber}화</span>
+      <span class="ep-title">${ep.title}</span>
+      <span class="ep-date">${formatDate(ep.createdAt)}</span>
+      ${isProcessing ? '<span class="badge processing">생성 중...</span>' : ''}
+      ${isFailed    ? '<span class="badge failed">생성 실패</span>' : ''}
+    </li>
+  `;
+}
+
+// VN 플레이어 모달 열기
+function openVnPlayer(episodeNumber) {
+  const modal = document.getElementById('vn-modal');
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';  // 배경 스크롤 잠금
+
+  const iframe = document.getElementById('vn-iframe');
+  iframe.src = 'player.html';
+  iframe.onload = () => {
+    iframe.contentWindow.postMessage(
+      { seriesId, episodeNumber },
+      window.location.origin
+    );
+    iframe.onload = null;
   };
 }
+
+// VN 플레이어 모달 닫기 (읽기 이력 저장)
+function closeVnPlayer(episodeNumber) {
+  document.getElementById('vn-modal').classList.add('hidden');
+  document.body.style.overflow = '';
+  markEpisodeAsRead(seriesId, episodeNumber);
+  renderEpisodeList(...);  // 읽은 항목 회색 처리 갱신
+}
+
+// ESC 키 닫기
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeVnPlayer(currentEpisodeNumber);
+});
 ```
 
-### 변경사항 4 — `selectNovel()` 내 VN 탭 활성 상태 시 자동 전달 (63~66 라인 부근)
+---
+
+### 2.5 VN 플레이어 변경점 (`player.js`)
+
+기존 `novelId` 수신 → `{ seriesId, episodeNumber }` 수신으로 변경.
 
 ```javascript
-// 변경 전
-if (result.success) {
-  currentAssets = result.data;
-  renderAssets();
-  noNovelEl.style.display = 'none';
-  novelContentEl.style.display = 'flex';
-  novelTitleEl.textContent = currentAssets.novel.novelTitle;
-}
+// 기존
+const novelId = event.data?.novelId;
+await loadNovel(novelId);  // GET /novels/:id/vn-script
 
 // 변경 후
-if (result.success) {
-  currentAssets = result.data;
-  renderAssets();
-  noNovelEl.style.display = 'none';
-  novelContentEl.style.display = 'flex';
-  novelTitleEl.textContent = currentAssets.novel.novelTitle;
-  // VN 탭 활성 상태에서 소설을 변경하면 즉시 전달
-  if (activeTab === 'vn') {
-    sendNovelIdToVnPlayer(currentNovelId);
+const { seriesId, episodeNumber } = event.data ?? {};
+if (!seriesId || !episodeNumber) return;
+await loadScript(seriesId, episodeNumber);  // GET /series/:id/episodes/:num/vn-script
+```
+
+`loadScript` 함수 API 경로만 변경, 스크립트 파싱 및 엔진 로직은 그대로 유지.
+
+---
+
+### 2.6 작가 관리 화면 (`mine.html` / `mine.js`)
+
+#### HTML 구조
+
+```html
+<header> ... </header>
+
+<!-- 미로그인 상태 -->
+<div id="login-prompt" class="hidden">
+  <p>내 작품을 관리하려면 로그인하세요.</p>
+  <button onclick="Auth.showLoginModal()">로그인</button>
+</div>
+
+<!-- 로그인 상태 -->
+<div id="mine-content" class="hidden">
+  <div class="mine-header">
+    <h2>내 작품</h2>
+    <button id="new-series-btn" onclick="showNewSeriesModal()">+ 새 작품 만들기</button>
+  </div>
+  <div id="mine-grid" class="card-grid"> ... </div>
+</div>
+
+<!-- 새 작품 만들기 모달 -->
+<div id="new-series-modal" class="modal hidden">
+  <input id="ns-title" placeholder="작품 제목">
+  <textarea id="ns-desc" placeholder="작품 소개 (선택)"></textarea>
+  <button onclick="submitNewSeries()">만들기</button>
+</div>
+
+<!-- 작품 상세 모달 -->
+<div id="series-detail-modal" class="modal hidden">
+  <div class="tab-bar">
+    <button data-tab="episodes" class="active">회차</button>
+    <button data-tab="assets">에셋</button>
+  </div>
+
+  <!-- 회차 탭 -->
+  <div id="ep-tab">
+    <ul id="ep-list"> ... </ul>
+    <button id="add-episode-btn">+ 다음 회차 추가</button>
+  </div>
+
+  <!-- 에셋 탭 -->
+  <div id="assets-tab" class="hidden">
+    <section class="char-gallery"> ... </section>
+    <section class="bg-gallery"> ... </section>
+  </div>
+</div>
+
+<!-- 회차 추가 모달 -->
+<div id="add-episode-modal" class="modal hidden">
+  <input id="ep-title" placeholder="회차 제목">
+  <input id="ep-file" type="file" accept=".txt">
+  <button onclick="submitAddEpisode()">업로드</button>
+</div>
+```
+
+#### `mine.js` 주요 로직
+
+```javascript
+async function init() {
+  if (!Auth.isLoggedIn()) {
+    show('login-prompt'); return;
   }
+  show('mine-content');
+  await loadMySeries();
+}
+
+// 내 작품 목록
+async function loadMySeries() {
+  const data = await Auth.authFetch('/series/mine').then(r => r.json());
+  renderMineGrid(data.data);
+}
+
+// 새 작품 생성
+async function submitNewSeries() {
+  const title = document.getElementById('ns-title').value.trim();
+  const description = document.getElementById('ns-desc').value.trim();
+  await Auth.authFetch('/series', {
+    method: 'POST',
+    body: JSON.stringify({ title, description }),
+  });
+  closeModal('new-series-modal');
+  await loadMySeries();
+}
+
+// 작품 상세 모달 열기
+async function openSeriesDetail(seriesId) {
+  currentSeriesId = seriesId;
+  const [detail, assets] = await Promise.all([
+    fetch(`/series/${seriesId}`).then(r => r.json()),
+    fetch(`/series/${seriesId}/assets`).then(r => r.json()),
+  ]);
+  renderEpisodeList(detail.data.episodes);
+  renderAssetsGallery(assets.data);
+  checkAddEpisodeBtn(detail.data.episodes);
+  show('series-detail-modal');
+}
+
+// 회차 추가 버튼 활성화 여부
+function checkAddEpisodeBtn(episodes) {
+  const isProcessing = episodes.some(e => e.status === 'PROCESSING');
+  document.getElementById('add-episode-btn').disabled = isProcessing;
+}
+
+// 회차 추가 제출 (multipart/form-data)
+async function submitAddEpisode() {
+  const title = document.getElementById('ep-title').value.trim();
+  const file = document.getElementById('ep-file').files[0];
+
+  const formData = new FormData();
+  formData.append('title', title);
+  formData.append('file', file);
+
+  await Auth.authFetch(`/series/${currentSeriesId}/episodes`, {
+    method: 'POST',
+    headers: {},               // Content-Type은 FormData가 자동 설정 (multipart boundary 포함)
+    body: formData,
+  });
+  closeModal('add-episode-modal');
+  startPolling(currentSeriesId);
+}
+
+// 파이프라인 폴링 (3초 간격)
+// PROCESSING 중인 에피소드가 없어지면 자동 중단
+let pollingTimer = null;
+function startPolling(seriesId) {
+  if (pollingTimer) clearInterval(pollingTimer);
+  pollingTimer = setInterval(async () => {
+    const detail = await fetch(`/series/${seriesId}`).then(r => r.json());
+    renderEpisodeList(detail.data.episodes);
+    checkAddEpisodeBtn(detail.data.episodes);
+    const stillProcessing = detail.data.episodes.some(e => e.status === 'PROCESSING');
+    if (!stillProcessing) {
+      clearInterval(pollingTimer);
+      pollingTimer = null;
+    }
+  }, 3000);
+}
+
+// 파이프라인 진행도 스텝 인디케이터 렌더링
+const STEP_LABELS = {
+  parseCharacters:          '캐릭터 분석',
+  parseBackgrounds:         '배경 분석',
+  parseScenes:              '씬 분석',
+  generateCharacterImages:  '캐릭터 이미지 생성',
+  generateBackgroundImages: '배경 이미지 생성',
+};
+
+const STEP_ICONS = {
+  PENDING:    '○',
+  PROCESSING: '⟳',
+  DONE:       '✓',
+  FAILED:     '✕',
+};
+
+function renderPipelineSteps(episode) {
+  if (episode.status !== 'PROCESSING' && episode.status !== 'FAILED') return '';
+  const steps = episode.pipelineSteps;
+
+  const items = Object.entries(STEP_LABELS).map(([key, label]) => {
+    const status = steps[key] ?? 'PENDING';
+    const isFailed = status === 'FAILED';
+    return `
+      <li class="pipeline-step ${status.toLowerCase()}">
+        <span class="step-icon">${STEP_ICONS[status]}</span>
+        <span class="step-label">${label}</span>
+        ${isFailed ? `<button onclick="retryStep('${episode.seriesId}', ${episode.episodeNumber}, '${key}')">재실행</button>` : ''}
+      </li>
+    `;
+  }).join('');
+
+  return `<ul class="pipeline-steps">${items}</ul>`;
+}
+
+// 특정 단계 단독 재실행 (stepKey는 StepKey enum 값과 동일한 문자열)
+async function retryStep(seriesId, episodeNumber, stepKey) {
+  const STEP_ENDPOINTS = {
+    parseCharacters:          `/parsing/characters`,
+    parseBackgrounds:         `/parsing/backgrounds`,
+    parseScenes:              `/parsing/scenes`,
+    generateCharacterImages:  `/images/characters`,
+    generateBackgroundImages: `/images/backgrounds`,
+  };
+  const url = STEP_ENDPOINTS[stepKey];
+  if (!url) return;
+
+  await Auth.authFetch(url, {
+    method: 'POST',
+    body: JSON.stringify({ seriesId, episodeNumber }),
+  });
+  startPolling(seriesId);
+}
+
+// 회차 삭제
+async function deleteEpisode(episodeNumber) {
+  if (!confirm(`${episodeNumber}화를 삭제하시겠습니까?`)) return;
+  await Auth.authFetch(`/series/${currentSeriesId}/episodes/${episodeNumber}`, {
+    method: 'DELETE',
+  });
+  await openSeriesDetail(currentSeriesId);  // 목록 갱신
+}
+
+// 에셋 갤러리 (캐릭터 감정별 이미지)
+function renderCharGallery(characters) {
+  return characters.map(char => `
+    <div class="char-card">
+      <h4>${char.name}</h4>
+      <div class="emotion-grid">
+        ${char.images.map(img => `
+          <div class="emotion-item">
+            <img src="${img.nobgUrl ?? img.url}" alt="${img.emotion}">
+            <span>${img.emotion}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
 }
 ```
 
 ---
 
-## 구현 순서 (권장)
+### 2.7 로그인/회원가입 모달 (공통 `auth.js`)
 
-```
-1. novel-parsing.service.ts  — sceneSchema에 isEntry/isExit/position 추가     (§1)
-2. prompt/prompt.ts          — scene_prompt에 지시사항 추가                    (§2)
-3. novel.service.ts          — getVnScript() + buildMonogatariScript() 구현    (§3-2, §4)
-4. novel.controller.ts       — GET /novels/:id/vn-script 라우트 등록           (§3-1)
-5. novel.module.ts           — S3HelperService providers 추가 확인             (§3-3)
-6. frontend/vn.html          — 신규 생성                                       (§5)
-7. frontend/vn.js            — 신규 생성                                       (§6)
-8. frontend/index.html       — Visual Novel 탭 + iframe 컨테이너 추가          (§7)
-9. frontend/app.js           — 탭 전환 로직 + postMessage 연동                 (§8)
+```javascript
+// 로그인 모달
+Auth.showLoginModal = () => {
+  // loginId + password 입력 폼 표시
+  // 제출 시 POST /auth/login → 성공하면 token 저장, 모달 닫기, header 갱신
+};
+
+// 회원가입 모달
+Auth.showRegisterModal = () => {
+  // loginId + email + password + nickname 입력 폼 표시
+  // 제출 시 POST /auth/register → 성공하면 자동 로그인(POST /auth/login) → token 저장
+};
+
+// 헤더 갱신
+Auth.updateHeader = async () => {
+  const area = document.getElementById('auth-area');
+  if (!Auth.isLoggedIn()) {
+    area.innerHTML = `<button onclick="Auth.showLoginModal()">로그인</button>`;
+    return;
+  }
+  const me = await Auth.authFetch('/auth/me').then(r => r.json()).catch(() => null);
+  if (!me?.data) {
+    Auth.removeToken();
+    area.innerHTML = `<button onclick="Auth.showLoginModal()">로그인</button>`;
+    return;
+  }
+  area.innerHTML = `
+    <span class="nickname">${me.data.nickname}</span>
+    <a href="/mine.html">내 작품</a>
+    <button onclick="Auth.logout()">로그아웃</button>
+  `;
+};
+
+Auth.logout = () => {
+  Auth.removeToken();
+  location.reload();
+};
 ```
 
 ---
 
-## 테스트 체크리스트
+## 3. 스타일 가이드 (`style.css`)
 
-| # | 항목 | 검증 방법 |
+### 주요 공통 클래스
+
+```css
+/* 전체화면 모달 (VN 플레이어) */
+.modal-fullscreen {
+  position: fixed; inset: 0;
+  z-index: 9999;
+  background: #000;
+}
+.modal-fullscreen #vn-close-btn {
+  position: absolute; top: 16px; right: 16px;
+  z-index: 10000;
+  background: rgba(255,255,255,0.2);
+  border: none; color: #fff;
+  padding: 8px 12px; cursor: pointer;
+}
+.modal-fullscreen iframe {
+  width: 100%; height: 100%; border: none;
+}
+
+/* 읽은 회차 회색 처리 */
+.episode-item.read {
+  opacity: 0.45;
+  color: #888;
+}
+
+/* 상태 배지 */
+.badge.processing { background: #f0ad4e; color: #fff; }
+.badge.failed     { background: #d9534f; color: #fff; }
+
+/* 카드 그리드 */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+```
+
+---
+
+## 4. 환경변수 (`.env`) 추가 항목
+
+```
+JWT_SECRET=<랜덤 32바이트 이상 문자열>
+```
+
+기존 항목:
+```
+DB_HOST / DB_PORT / DB_USER / DB_PASS / DB_NAME
+AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION / S3_BUCKET
+GEMINI_API_KEY / LEONARDO_API_KEY
+```
+
+---
+
+## 5. 패키지 추가
+
+```bash
+# 백엔드
+npm install @nestjs/passport @nestjs/jwt passport passport-jwt bcrypt
+npm install -D @types/passport-jwt @types/bcrypt
+npm install @nestjs/platform-express multer
+npm install -D @types/multer
+```
+
+---
+
+## 6. 구현 우선순위 (Phase)
+
+### Phase 1 — 백엔드 기반
+
+| 순서 | 작업 | 파일 |
 |---|---|---|
-| 1 | `POST /parsing/scenes` 재호출 후 `isEntry`/`isExit`/`position` 필드가 scenes.json에 포함되는지 | S3 파일 직접 다운로드 후 확인 |
-| 2 | `GET /novels/:id/vn-script` 응답에 `characters`, `scenes`, `script` 키 존재 | API 직접 호출 (api_test.http) |
-| 3 | `script` 배열에 `show scene`, `show character`, `hide character`, `end` 순서 정확한지 | 응답 JSON 육안 검토 |
-| 4 | 구버전 scenes.json (isEntry 없음) 처리 시 서버 오류 없이 기본값으로 변환 | isEntry 없는 JSON으로 직접 호출 |
-| 5 | `vn.html` 단독 브라우저 접근 시 로딩 오버레이만 표시, 콘솔 오류 없음 | 브라우저 직접 접근 |
-| 6 | 소설 선택 → Visual Novel 탭 전환 → Monogatari 플레이어 초기화 완료 | 브라우저 E2E |
-| 7 | 다른 소설로 전환 시 Monogatari 스크립트 갱신 | 두 소설을 번갈아 선택 |
-| 8 | Characters / Backgrounds 탭 기능 유지 확인 | VN 탭 전환 후 되돌아오기 |
+| 1 | 마이그레이션 도입, 엔티티 수정/신규 | `entities/`, `migrations/` |
+| 2 | `RepositoryProvider` 확장 | `common/repository.provider.ts` |
+| 3 | `AuthModule` 구현 | `auth/` |
+| 4 | `SeriesModule` 구현 | `series/` |
+| 5 | `EpisodeModule` + `EpisodePipelineService` | `episode/` |
+| 6 | `ParsingModule` 리팩토링 (병합 전략) | `parsing/` |
+| 7 | `ImageModule` 리팩토링 (S3 경로, 버그 수정) | `image/` |
+
+### Phase 2 — 프론트엔드
+
+| 순서 | 작업 | 파일 |
+|---|---|---|
+| 8 | `auth.js` 공통 헬퍼 | `frontend/auth.js` |
+| 9 | 독자 메인 | `frontend/index.html`, `index.js` |
+| 10 | 작품 상세 + VN 플레이어 모달 | `frontend/series.html`, `series.js` |
+| 11 | `player.js` 수신 파라미터 수정 | `frontend/player.js` |
+| 12 | 작가 관리 화면 | `frontend/mine.html`, `mine.js` |
+
+### Phase 3 — 완성도
+
+| 순서 | 작업 |
+|---|---|
+| 13 | 에러 토스트 UI (공통 헬퍼) |
+| 14 | 로딩 스피너 (파이프라인 중 skeleton UI) |
+| 15 | 반응형 CSS (모바일 대응) |
+| 16 | `player.js` postMessage origin 검증 |
+
+---
+
+## 7. 기존 코드 삭제 대상
+
+| 파일/경로 | 처리 |
+|---|---|
+| `src/novel/` | `src/series/`로 교체 후 삭제 |
+| `src/entities/novel.entity.ts` | `series.entity.ts`로 교체 후 삭제 |
+| `frontend/app.js` | `index.js` + `series.js` + `mine.js`로 분리 후 삭제 |
+| `src/image/image.controller.ts` 외부 라우트 | 내부 전용으로 전환 (컨트롤러 비활성화 또는 Guard 적용) |

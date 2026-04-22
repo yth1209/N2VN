@@ -395,25 +395,22 @@ frontend/
 ├── index.html          # 메인 대시보드 (소설 목록 + 탭 뷰)
 ├── app.js              # 메인 애플리케이션 로직
 ├── style.css           # 메인 스타일시트
-├── vn.html             # Monogatari 비주얼 노벨 플레이어 (iframe 단독 페이지)
-├── vn.js               # VN 플레이어 초기화 로직
-├── monogatari.css      # Monogatari npm 패키지에서 복사한 로컬 CSS
-├── monogatari.js       # Monogatari npm 패키지에서 복사한 로컬 JS
-└── package.json        # @monogatari/core ^2.6.0 의존성
+├── player.html         # 커스텀 VN 플레이어 (iframe 단독 페이지)
+└── player.js           # 커스텀 VN 엔진 로직
 ```
 
-> **Monogatari 로컬 배포:** CDN 대신 npm(`@monogatari/core@^2.6.0`)으로 설치 후 `monogatari.css`, `monogatari.js`를 `frontend/` 루트에 직접 복사하여 사용.
+> **커스텀 VN 엔진:** Monogatari 등 외부 라이브러리 없이 직접 구현. `player.html`을 iframe으로 임베드하고 postMessage로 novelId를 전달하는 구조.
 
 ### 6.2 `index.html` 구조
 
 3개 탭 구성:
 - **Characters** — 캐릭터별 감정 이미지 갤러리 + NOBG 토글
 - **Backgrounds** — 배경 이미지 카드 갤러리
-- **Visual Novel** — `vn.html`을 임베드하는 `<iframe>` (높이 600px)
+- **Visual Novel** — `player.html`을 임베드하는 `<iframe>` (높이 600px)
 
 ```html
 <div id="vn-view" style="display: none; width: 100%; height: 600px;">
-  <iframe id="vn-iframe" src="vn.html" style="width: 100%; height: 100%; border: none;" allow="autoplay"></iframe>
+  <iframe id="vn-iframe" src="player.html" style="width: 100%; height: 100%; border: none;" allow="autoplay"></iframe>
 </div>
 ```
 
@@ -431,50 +428,36 @@ else if (activeTab === 'vn') {
 
 **`sendNovelIdToVnPlayer(novelId)`:**
 ```javascript
-// iframe src를 재지정하여 Monogatari 인스턴스를 완전 초기화
-vnIframeEl.src = 'vn.html';
+// iframe src를 재지정하여 엔진 상태를 완전 초기화
+vnIframeEl.src = 'player.html';
 vnIframeEl.onload = () => {
   vnIframeEl.contentWindow.postMessage({ novelId }, window.location.origin);
   vnIframeEl.onload = null;
 };
 ```
 
-> 소설 변경 시 iframe을 리로드하는 방식으로 Monogatari 재초기화 문제를 회피.
+> 소설 변경 시 iframe을 리로드하는 방식으로 엔진 상태 초기화.
 
 **소설 선택 시 VN 탭 자동 갱신:** `selectNovel()` 내에서 현재 탭이 `'vn'`이면 즉시 `sendNovelIdToVnPlayer()` 호출.
 
-### 6.4 `vn.js` 주요 로직
+### 6.4 `player.js` 주요 로직
 
 **postMessage 수신:**
 ```javascript
 window.addEventListener('message', async (event) => {
   const novelId = event.data?.novelId;
   if (!novelId) return;
-  // GET /novels/:id/vn-script 호출 후 initMonogatari()
+  await loadNovel(novelId);  // GET /novels/:id/vn-script 호출
 });
 ```
 
-**`initMonogatari({ characters, scenes, script })`:**
-```javascript
-monogatari.settings({
-  'AssetsPath': {
-    'root': '', 'characters': '', 'scenes': '', 'audio': '', 'videos': '', 'images': ''
-  }
-  // AssetsPath를 빈 문자열로 설정 → S3 절대 URL이 prefix 없이 그대로 사용됨
-});
-
-// 캐릭터 등록 (S3 절대 URL sprites)
-for (const [charId, charData] of Object.entries(characters)) {
-  monogatari.characters({ [charId]: { name: charData.name, sprites: charData.sprites } });
-}
-
-monogatari.assets('scenes', scenes);    // 배경 등록
-monogatari.script({ 'main': script });  // 스크립트 등록
-monogatari.init('#monogatari').then(() => {
-  document.getElementById('loading-overlay').classList.add('hidden');
-  monogatari.element().find('[data-action="new"]').trigger('click'); // 새 게임 자동 시작
-});
-```
+**커스텀 엔진 구조:**
+- `vnScript[]` 배열을 순회하며 `executeCommand(cmd)` 실행
+- `cmd`가 `string`이면: `show scene`, `show character`, `hide character`, narrator, `'end'` 처리
+- `cmd`가 `object`이면: `{ '화자명': '대사' }` 형태의 캐릭터 대사
+- dialogue/narration에서만 클릭 대기 (`shouldPause = true`), 나머지 명령은 루프로 연속 처리
+- 타이프라이터 효과: 25ms 간격 한 글자씩, 클릭 시 즉시 완성
+- 화자 하이라이트: 발화 캐릭터 `brightness(1.0) + scale(1.02)`, 나머지 `brightness(0.5)`
 
 ---
 
@@ -509,6 +492,5 @@ Step 8: GET  /novels/:id/vn-script -> scenes.json + DB 조합 -> Monogatari scri
 | 4 | 전체 | 이미지 생성 진행 상황 추적 불가 | WebSocket 또는 SSE로 실시간 진행률 전송 |
 | 5 | 전체 | `scenes.json`이 S3에만 저장, DB 미저장 | 게임 런타임이 S3 파일에 강하게 의존하는 구조 |
 | 6 | 전체 | `novel.txt` 수동 S3 업로드 필요 | 파일 업로드 API 엔드포인트 추가 |
-| 7 | `vn.js` | postMessage origin 검증 없음 (개발 편의) | 프로덕션 배포 시 origin 체크 추가 필요 |
-| 8 | `vn.js` | Monogatari `init()` 후 `[data-action="new"]` 트리거 방식은 버전에 따라 동작 다를 수 있음 | Monogatari 2.6.0 정식 API 문서 확인 필요 |
-| 9 | 전체 | BGM 생성 파이프라인 미완성 (`bgm_prompt`만 scenes.json에 저장, 실제 음악 생성 없음) | 음악 생성 API 연동 후 `play music` 명령 script에 삽입 |
+| 7 | `player.js` | postMessage origin 검증 없음 (개발 편의) | 프로덕션 배포 시 origin 체크 추가 필요 |
+| 8 | 전체 | BGM 생성 파이프라인 미완성 (`bgm_prompt`만 scenes.json에 저장, 실제 음악 생성 없음) | 음악 생성 API 연동 후 커스텀 엔진에 BGM 재생 명령 추가 |
