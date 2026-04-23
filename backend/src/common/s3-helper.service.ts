@@ -17,19 +17,28 @@ export class S3HelperService {
     this.s3Client = new S3Client({
       region,
       ...(accessKeyId && secretAccessKey
-        ? {
-            credentials: {
-              accessKeyId,
-              secretAccessKey,
-            },
-          }
+        ? { credentials: { accessKeyId, secretAccessKey } }
         : {}),
     });
   }
 
-  /**
-   * S3 버킷에 JSON 데이터를 저장하는 공통 헬퍼 메서드 (SSE-S3 적용)
-   */
+  async uploadText(objectKey: string, text: string): Promise<void> {
+    try {
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        Body: text,
+        ContentType: 'text/plain',
+        ServerSideEncryption: 'AES256',
+      });
+      await this.s3Client.send(command);
+      this.logger.log(`Saved text to S3: ${objectKey}`);
+    } catch (error) {
+      this.logger.error(`S3 text 업로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to upload text to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
   async uploadJson(objectKey: string, data: any): Promise<void> {
     try {
       const command = new PutObjectCommand({
@@ -40,45 +49,30 @@ export class S3HelperService {
         ServerSideEncryption: 'AES256',
       });
       await this.s3Client.send(command);
-      this.logger.log(`Saved JSON to S3 bucket ${this.bucketName} at key: ${objectKey}`);
+      this.logger.log(`Saved JSON to S3: ${objectKey}`);
     } catch (error) {
-      this.logger.error(`S3 JSON 파일 업로드 실패: ${objectKey}`, error);
-      throw new HttpException(`Failed to upload ${objectKey} to S3`, HttpStatus.INTERNAL_SERVER_ERROR);
+      this.logger.error(`S3 JSON 업로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to upload JSON to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
-  /**
-   * S3 폴더에서 소설 텍스트 등을 문자열로 읽어오는 공통 헬퍼 메서드
-   */
   async readText(objectKey: string): Promise<string> {
     try {
-      const command = new GetObjectCommand({
-        Bucket: this.bucketName,
-        Key: objectKey,
-      });
+      const command = new GetObjectCommand({ Bucket: this.bucketName, Key: objectKey });
       const response = await this.s3Client.send(command);
-      
-      if (response.Body) {
-        return await response.Body.transformToString();
-      }
-      throw new Error("Response body is empty");
+      if (response.Body) return await response.Body.transformToString();
+      throw new Error('Response body is empty');
     } catch (error) {
       this.logger.error(`S3 텍스트 읽기 실패: ${objectKey}`, error);
       throw new HttpException(`Failed to read text from S3: ${objectKey}`, HttpStatus.BAD_REQUEST);
     }
   }
 
-  /**
-   * S3 폴더에서 JSON 데이터를 읽어보는 공통 헬퍼 메서드
-   */
   async readJson(objectKey: string): Promise<any> {
     const textData = await this.readText(objectKey);
     return JSON.parse(textData);
   }
 
-  /**
-   * S3 버킷에 이미지(Buffer)를 업로드하는 헬퍼 메서드 (SSE-S3 적용)
-   */
   async uploadImage(objectKey: string, buffer: Buffer, mimeType: string = 'image/png'): Promise<void> {
     try {
       const command = new PutObjectCommand({
@@ -89,10 +83,10 @@ export class S3HelperService {
         ServerSideEncryption: 'AES256',
       });
       await this.s3Client.send(command);
-      this.logger.log(`Saved Image to S3 bucket ${this.bucketName} at key: ${objectKey}`);
+      this.logger.log(`Saved image to S3: ${objectKey}`);
     } catch (error) {
-      this.logger.error(`S3 Image 파일 업로드 실패: ${objectKey}`, error);
-      throw new HttpException(`Failed to upload image ${objectKey} to S3`, HttpStatus.INTERNAL_SERVER_ERROR);
+      this.logger.error(`S3 이미지 업로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to upload image to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }

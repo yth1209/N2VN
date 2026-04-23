@@ -277,8 +277,8 @@ export class RepositoryProvider {
 // 업로드 키 예시
 `series/${seriesId}/episodes/${episodeNumber}/novel.txt`
 `series/${seriesId}/episodes/${episodeNumber}/scenes.json`
-`series/${seriesId}/characters/${charId}_${emotion}.png`
-`series/${seriesId}/characters/${charId}_${emotion}_NOBG.png`
+`series/${seriesId}/characters/${charId}/${emotion}.png`
+`series/${seriesId}/characters/${charId}/${emotion}_NOBG.png`
 `series/${seriesId}/backgrounds/${bgId}.png`
 ```
 
@@ -395,7 +395,7 @@ const list = await this.repo.series.find({
 ```typescript
 // 기존 getNovelAssets() N+1 수정 버전
 // characters 조회 -> In(charIds)로 characterImgs 한 번에 조회
-// S3 URL 조합: https://{bucket}.s3.{region}.amazonaws.com/series/{seriesId}/characters/{charId}_{emotion}.png
+// S3 URL 조합: https://{bucket}.s3.{region}.amazonaws.com/series/{seriesId}/characters/{charId}/{emotion}.png
 ```
 
 ---

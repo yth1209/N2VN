@@ -1,18 +1,17 @@
-import { Entity, PrimaryColumn, Column, ManyToOne, JoinColumn } from 'typeorm';
-import { Novel } from './novel.entity';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn } from 'typeorm';
+import { Series } from './series.entity';
 
 @Entity('background')
 export class Background {
-  @PrimaryColumn({ type: 'varchar', length: 150 })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'int' })
-  novelId: number;
+  @Column({ type: 'varchar' })
+  seriesId: string;
 
-  /** DB 상의 FK 제약조건 및 Cascade 명시를 위한 가상 관계 매핑 (로직 사용 X) */
-  @ManyToOne(() => Novel, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'novelId' })
-  _novelFk?: Novel;
+  @ManyToOne(() => Series, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'seriesId' })
+  series: Series;
 
   @Column({ type: 'varchar', length: 255 })
   name: string;

@@ -10,7 +10,10 @@
     "lib": ["ES2024"],
     "sourceMap": true,
     "outDir": "./dist",
-    "baseUrl": "./",
+    "baseUrl": ".",
+    "paths": {
+      "git_modules/*": ["./git_modules/*"]
+    },
     "incremental": true,
     "skipLibCheck": true,
     "strictNullChecks": false,
@@ -20,3 +23,4 @@
     "noFallthroughCasesInSwitch": false
   }
 }
+

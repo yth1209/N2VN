@@ -1,5 +1,4 @@
-const BASE_URL = 'http://localhost:3000';
-
+﻿
 // ── State ──────────────────────────────────────────
 let vnScript   = [];
 let scriptIndex = 0;
@@ -28,17 +27,17 @@ const endScreen   = document.getElementById('end-screen');
 
 // ── Entry ──────────────────────────────────────────
 window.addEventListener('message', async (event) => {
-  const novelId = event.data?.novelId;
-  if (!novelId) return;
-  await loadNovel(novelId);
+  const { seriesId, episodeNumber } = event.data ?? {};
+  if (!seriesId || !episodeNumber) return;
+  await loadScript(seriesId, episodeNumber);
 });
 
-async function loadNovel(novelId) {
+async function loadScript(seriesId, episodeNumber) {
   loadingEl.classList.remove('hidden');
-  loadingTextEl.textContent = `소설 #${novelId} 데이터를 불러오는 중...`;
+  loadingTextEl.textContent = `${episodeNumber}화 데이터를 불러오는 중...`;
 
   try {
-    const res    = await fetch(`${BASE_URL}/novels/${novelId}/vn-script`);
+    const res    = await fetch(`${BASE_URL}/series/${seriesId}/episodes/${episodeNumber}/vn-script`);
     const result = await res.json();
 
     if (!result.success) {

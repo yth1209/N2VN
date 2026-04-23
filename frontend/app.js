@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:3000';
+
 let currentNovelId = null;
 let currentAssets = null;
 let activeTab = 'characters';

@@ -1,63 +1,155 @@
 ### API 테스트용 변수 및 설정
 @baseUrl = http://localhost:3000
-@novelId = 1
-@novelTitle = 배신당한 화산파 삼류제자가 칼을 숨김
+@seriesId = d8610d94-3e2b-11f1-b3ff-067202af79bf
+@episodeNumber = 1
+@jwtToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlY2Y1MWQ3My05YTIxLTRlMzQtOGNkNC03NzYwNTViNmZkYWYiLCJsb2dpbklkIjoieXRoMTIwOSIsImlhdCI6MTc3NjkwNjI1MCwiZXhwIjoxNzc2OTkyNjUwfQ.yYyst20_EqNjGOC6B8GtNJBY6eZ7A5xSSxEmp-e69rM
 
-### 1. 소설 목록 조회 (GET)
-GET {{baseUrl}}/novels
 
-### 2. 새 소설 생성 (POST)
-# @name createNovel
-POST {{baseUrl}}/novels
+
+### ══════════════════════════════════════
+###  AUTH
+### ══════════════════════════════════════
+
+### 1. 회원가입 (POST)
+POST {{baseUrl}}/auth/register
 Content-Type: application/json
 
 {
-    "novelTitle": "{{novelTitle}}"
+    "loginId": "testuser",
+    "email": "test@example.com",
+    "password": "password123",
+    "nickname": "테스트유저"
 }
 
-### 3. 캐릭터 메타데이터 추출 (POST)
-# novelId를 실제 생성된 ID로 변경하여 실행하세요
+### 2. 로그인 (POST)
+# @name login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+    "loginId": "yth1209",
+    "password": "sd003124*"
+}
+
+### 3. 내 정보 조회 (GET) — JWT 필요
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{jwtToken}}
+
+
+
+### ══════════════════════════════════════
+###  SERIES
+### ══════════════════════════════════════
+
+### 4. 전체 시리즈 목록 조회 (GET)
+GET {{baseUrl}}/series
+
+### 5. 내 시리즈 목록 조회 (GET) — JWT 필요
+GET {{baseUrl}}/series/mine
+Authorization: Bearer {{jwtToken}}
+
+### 6. 시리즈 생성 (POST) — JWT 필요
+# @name createSeries
+POST {{baseUrl}}/series
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+    "title": "배신당한 화산파 삼류제자가 칼을 숨김",
+    "description": "작품 소개 텍스트 (선택)"
+}
+
+### 7. 시리즈 상세 조회 (GET)
+GET {{baseUrl}}/series/{{seriesId}}
+
+### 8. 시리즈 에셋 조회 (GET) — 캐릭터·배경 S3 URL 반환
+GET {{baseUrl}}/series/{{seriesId}}/assets
+
+
+
+### ══════════════════════════════════════
+###  EPISODE
+### ══════════════════════════════════════
+
+### 9. 회차 생성 (POST) — JWT 필요, multipart/form-data
+# @name createEpisode
+# file 첨부는 REST Client 확장에서 < 문법으로 지정
+POST {{baseUrl}}/series/{{seriesId}}/episodes
+Authorization: Bearer {{jwtToken}}
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="title"
+
+1화 - 서막
+------Boundary
+Content-Disposition: form-data; name="file"; filename="episode1.txt"
+Content-Type: text/plain
+
+< ./episode1.txt
+------Boundary--
+
+### 10. 회차 상세 조회 (GET)
+GET {{baseUrl}}/series/{{seriesId}}/episodes/{{episodeNumber}}
+
+### 11. VN 스크립트 조회 (GET) — 비주얼 노벨 변환 결과
+GET {{baseUrl}}/series/{{seriesId}}/episodes/{{episodeNumber}}/vn-script
+
+### 12. 회차 삭제 (DELETE) — JWT 필요
+DELETE {{baseUrl}}/series/{{seriesId}}/episodes/{{episodeNumber}}
+Authorization: Bearer {{jwtToken}}
+
+
+
+### ══════════════════════════════════════
+###  PARSING  (파이프라인 Step 2~4)
+### ══════════════════════════════════════
+
+### 13. 캐릭터 파싱 (POST)
 POST {{baseUrl}}/parsing/characters
 Content-Type: application/json
 
 {
-    "novelId": {{novelId}}
+    "seriesId": "{{seriesId}}",
+    "episodeNumber": {{episodeNumber}}
 }
 
-### 4. 배경 메타데이터 추출 (POST)
+### 14. 배경 파싱 (POST)
 POST {{baseUrl}}/parsing/backgrounds
 Content-Type: application/json
 
 {
-    "novelId": {{novelId}}
+    "seriesId": "{{seriesId}}",
+    "episodeNumber": {{episodeNumber}}
 }
 
-### 5. 씬(Scene) 메타데이터 추출 (POST)
+### 15. 씬 파싱 (POST)
 POST {{baseUrl}}/parsing/scenes
 Content-Type: application/json
 
 {
-    "novelId": {{novelId}}
+    "seriesId": "{{seriesId}}",
+    "episodeNumber": {{episodeNumber}}
 }
 
-### 6. 캐릭터 이미지 생성 (Leonardo AI)
+
+
+### ══════════════════════════════════════
+###  IMAGE  (파이프라인 Step 5~6)
+### ══════════════════════════════════════
+
+### 16. 캐릭터 이미지 생성 (POST) — 백그라운드 실행
 POST {{baseUrl}}/images/characters
 Content-Type: application/json
 
 {
-    "novelId": {{novelId}}
+    "seriesId": "{{seriesId}}"
 }
 
-### 7. 배경 이미지 생성 (Leonardo AI)
+### 17. 배경 이미지 생성 (POST) — 백그라운드 실행
 POST {{baseUrl}}/images/backgrounds
 Content-Type: application/json
 
 {
-    "novelId": {{novelId}}
+    "seriesId": "{{seriesId}}"
 }
-
-### 8. 소설 에셋 조회 (GET) — 캐릭터·배경 S3 URL 반환
-GET {{baseUrl}}/novels/{{novelId}}/assets
-
-### 9. Monogatari VN 스크립트 조회 (GET) — 비주얼 노벨 변환 결과
-GET {{baseUrl}}/novels/{{novelId}}/vn-script

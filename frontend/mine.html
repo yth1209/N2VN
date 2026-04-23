@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>N2VN — 내 작품</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <a href="/" class="header-logo">N2VN</a>
+  <div id="auth-area" class="auth-area"></div>
+</header>
+
+<main class="page-main">
+
+  <!-- 미로그인 상태 -->
+  <div id="login-prompt" class="hidden center-box">
+    <p class="empty-msg">내 작품을 관리하려면 로그인이 필요합니다.</p>
+    <button class="btn-primary" onclick="Auth.showLoginModal()">로그인</button>
+  </div>
+
+  <!-- 로그인 상태 -->
+  <div id="mine-content" class="hidden">
+    <div class="mine-header">
+      <h2>내 작품</h2>
+      <button class="btn-primary" onclick="showNewSeriesModal()">+ 새 작품 만들기</button>
+    </div>
+    <div id="mine-grid" class="card-grid">
+      <div class="loading-placeholder">불러오는 중...</div>
+    </div>
+  </div>
+
+</main>
+
+<!-- 새 작품 만들기 모달 -->
+<div id="new-series-modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal('new-series-modal')">✕</button>
+    <h2>새 작품 만들기</h2>
+    <input id="ns-title" type="text" placeholder="작품 제목">
+    <textarea id="ns-desc" placeholder="작품 소개 (선택)" rows="3"></textarea>
+    <p id="ns-error" class="form-error"></p>
+    <button class="btn-primary full-width" onclick="submitNewSeries()">만들기</button>
+  </div>
+</div>
+
+<!-- 작품 상세 모달 -->
+<div id="series-detail-modal" class="modal hidden">
+  <div class="modal-box large">
+    <button class="modal-close" onclick="closeModal('series-detail-modal')">✕</button>
+    <h2 id="detail-title">작품 제목</h2>
+
+    <div class="tab-bar small">
+      <button class="tab-btn active" data-tab="episodes" onclick="switchDetailTab('episodes')">회차 관리</button>
+      <button class="tab-btn" data-tab="assets" onclick="switchDetailTab('assets')">에셋 갤러리</button>
+    </div>
+
+    <!-- 회차 탭 -->
+    <div id="detail-ep-tab">
+      <ul id="detail-ep-list" class="episode-list manage-list"></ul>
+      <button id="add-episode-btn" class="btn-secondary full-width" onclick="showAddEpisodeModal()">+ 다음 회차 추가</button>
+    </div>
+
+    <!-- 에셋 탭 -->
+    <div id="detail-assets-tab" class="hidden">
+      <div id="assets-content" class="assets-gallery">
+        <p class="empty-msg">에셋 탭을 클릭하면 갤러리가 로드됩니다.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 회차 추가 모달 -->
+<div id="add-episode-modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal('add-episode-modal')">✕</button>
+    <h2>회차 추가</h2>
+    <input id="ep-title" type="text" placeholder="회차 제목">
+    <div class="file-upload-area">
+      <label for="ep-file" class="file-label">
+        <span id="file-label-text">소설 텍스트 파일 선택 (.txt)</span>
+      </label>
+      <input id="ep-file" type="file" accept=".txt" style="display:none;" onchange="updateFileLabel(this)">
+    </div>
+    <p id="ep-error" class="form-error"></p>
+    <button class="btn-primary full-width" onclick="submitAddEpisode()">업로드 및 생성 시작</button>
+  </div>
+</div>
+
+<!-- 로그인 모달 -->
+<div id="login-modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="modal-close" onclick="Auth.hideLoginModal()">✕</button>
+    <h2>로그인</h2>
+    <input id="login-id" type="text" placeholder="아이디">
+    <input id="login-password" type="password" placeholder="비밀번호"
+           onkeydown="if(event.key==='Enter') Auth.submitLogin()">
+    <p id="login-error" class="form-error"></p>
+    <button class="btn-primary full-width" onclick="Auth.submitLogin()">로그인</button>
+    <p class="form-switch">계정이 없으신가요? <a href="#" onclick="Auth.hideLoginModal(); Auth.showRegisterModal();">회원가입</a></p>
+  </div>
+</div>
+
+<!-- 회원가입 모달 -->
+<div id="register-modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="modal-close" onclick="Auth.hideRegisterModal()">✕</button>
+    <h2>회원가입</h2>
+    <input id="reg-login-id" type="text" placeholder="아이디 (영문 소문자/숫자/_)">
+    <input id="reg-email" type="email" placeholder="이메일">
+    <input id="reg-password" type="password" placeholder="비밀번호 (8자 이상)">
+    <input id="reg-nickname" type="text" placeholder="닉네임">
+    <p id="register-error" class="form-error"></p>
+    <button class="btn-primary full-width" onclick="Auth.submitRegister()">가입하기</button>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script src="auth.js"></script>
+<script src="mine.js"></script>
+</body>
+</html>
