@@ -1,0 +1,3 @@
+[submodule "backend/git_modules/nestjs-logger"]
+	path = backend/git_modules/nestjs-logger
+	url = https://github.com/yth1209/nestjs-logger.git
