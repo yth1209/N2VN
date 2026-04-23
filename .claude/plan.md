@@ -1,333 +1,362 @@
-# N2VN Plan
+# N2VN 기획서 — BGM 생성 파이프라인 & 배경 이미지 최적화
 
-> proposal.md 기반으로 작성한 상세 기획서.
-> 개발 상세는 [development.md](development.md) 참조.
+> **작성 기준:** proposal.md (2026-04-23) 반영  
+> **이전 문서:** [.claude/proposal.md](./proposal.md)  
+> **후속 문서:** [.claude/development.md](./development.md)
 
 ---
 
-## 1. 핵심 변경 사항 요약
+## 1. 개선 배경 및 목적
 
-| 구분 | Before | After |
+### 1.1 현재 상태 요약
+
+| 영역 | 현재 상태 |
+|---|---|
+| BGM | 씬 파싱 시 `bgm_prompt`만 생성. 실제 음악 파일 없음 |
+| 배경 이미지 | 씬과 무관하게 전체 배경 목록을 일괄 생성 → 사용 안 되는 이미지 발생 |
+
+### 1.2 개선 목표
+
+1. **BGM 파이프라인 완성**: 각 씬의 분위기에 맞는 BGM을 자동 생성하여 비주얼 노벨 재생 시 음악이 흐르도록 한다.
+2. **배경 이미지 낭비 제거**: 실제로 씬에 배정된 배경만 이미지를 생성하여 불필요한 API 비용과 생성 시간을 제거한다.
+3. **BGM 재사용성 확보**: 유사한 분위기의 씬은 동일한 BGM을 공유하여 감상 몰입도를 높이고 생성 비용을 절감한다.
+
+---
+
+## 2. BGM 생성 파이프라인 기획
+
+### 2.1 핵심 개념: BGM의 역할
+
+비주얼 노벨에서 BGM은 단순한 배경음악이 아니라 **감정 증폭 장치**다. 씬의 분위기가 바뀔 때마다 새 BGM이 재생되면 몰입이 깨지므로, **같은 감정 톤의 씬들은 BGM을 공유**하는 것이 자연스럽다.
+
+### 2.2 BGM 식별 전략
+
+```
+씬 파싱 시점에 Gemini가 각 씬의 bgm_prompt를 생성
+  ↓
+LLM이 기존 BGM 목록(id + 설명)을 참고하여
+  ┌── 어울리는 BGM이 있으면 → 기존 BGM ID 반환 (재사용)
+  └── 없으면 → new_bgm_{num} 임시 ID 생성
+```
+
+**재사용 판단 기준 예시:**
+- 동일 소설 내 이미 생성된 BGM과 분위기 키워드 50% 이상 겹침
+- 감정 카테고리 동일 (예: 전투, 로맨스, 슬픔, 평온 등)
+
+### 2.3 BGM 데이터 생애주기
+
+```
+1단계: 씬 파싱 (LLM)
+  └── 씬별 bgm_prompt 생성
+  └── 기존 BGM과 매칭 또는 new_bgm_{n} 임시 ID 할당
+
+2단계: DB 적재 + UUID 발급
+  └── new_bgm_{n} → DB INSERT → 실제 UUID 발급
+  └── scenes.json의 임시 ID를 UUID로 일괄 치환 → S3 재저장
+
+3단계: BGM 음원 생성 (비동기)
+  └── BGM AI API 호출 (bgm_prompt 기반)
+  └── 생성된 음원 S3 업로드
+  └── DB에 파일 경로 업데이트
+```
+
+### 2.4 BGM 카테고리 설계
+
+LLM이 bgm_prompt 생성 시 아래 감정 카테고리 중 하나를 명시하도록 지시한다. 같은 카테고리 내에서 재사용 우선 검색을 수행한다.
+
+| 카테고리 | 대표 키워드 | 비주얼 노벨 사용 예시 |
 |---|---|---|
-| 소설 단위 | 소설 전체를 1개 레코드 | 작품(Series) + 회차(Episode) 2단계 구조 |
-| 업로드 방식 | 수동으로 S3에 novel.txt 사전 업로드 | API 통해 회차 텍스트 직접 업로드 |
-| 파이프라인 | 7단계 수동 API 호출 | 회차 업로드 시 자동으로 전체 파이프라인 실행 |
-| 화면 구성 | 단일 대시보드 | 독자 화면 / 작가(내 작품) 화면 분리 |
-| 인증 | 없음 | 회원가입/로그인 (JWT) |
-| VN 플레이어 | 탭 내 iframe | 전체화면 모달, ESC/버튼으로 닫기 |
-| 읽기 이력 | 없음 | 로컬스토리지 기반 회차 읽기 이력 + 회색 처리 |
+| `ACTION` | intense, battle, fast-paced | 전투, 추격 장면 |
+| `ROMANCE` | tender, warm, heartfelt | 고백, 설레임 장면 |
+| `MYSTERY` | tense, eerie, suspenseful | 사건 발생, 의혹 장면 |
+| `PEACEFUL` | calm, gentle, ambient | 일상, 회화 장면 |
+| `SAD` | melancholic, somber, lonely | 이별, 상실 장면 |
+| `EPIC` | grand, orchestral, heroic | 클라이맥스, 결전 장면 |
+| `DARK` | ominous, heavy, oppressive | 악당 등장, 위기 장면 |
 
----
+### 2.5 BGM AI 서비스 선정 기준
 
-## 2. DB 스키마 설계
+비주얼 노벨 BGM은 다음 조건을 충족해야 한다:
+- **무가사 인스트루멘탈**: 대사와 음악이 충돌하지 않도록
+- **루프 가능한 구조**: 씬 길이에 상관없이 반복 재생
+- **분위기 제어 가능**: 텍스트 프롬프트로 장르·감정 지정
+- **REST API 제공**: 기존 아키텍처와 동일한 방식으로 연동
 
-### 2.1 `user` (신규)
+#### 서비스 비교 분석
 
-```typescript
-@Entity('user')
-class User {
-  id: string;           // PK: UUID v4 (@PrimaryGeneratedColumn('uuid'))
-  loginId: string;      // UNIQUE, 사용자 직접 입력하는 로그인 ID
-  email: string;        // UNIQUE, 연락용 이메일
-  password: string;     // bcrypt 해시
-  nickname: string;     // 표시 이름
-  createdAt: Date;
-}
-```
-
-### 2.2 `series` (기존 `novel` 리네임 + 확장)
-
-```typescript
-@Entity('series')
-class Series {
-  id: string;                  // PK: UUID v4 (@PrimaryGeneratedColumn('uuid'))
-  title: string;               // 작품 제목 (VARCHAR 255)
-  description: string;         // 작품 소개 (TEXT, 선택)
-  authorId: string;            // FK → user.id (CASCADE DELETE)
-  characterStyleKey: string;   // 캐릭터 이미지 스타일 키
-  characterArtStyle: string;   // 캐릭터 아트 스타일 텍스트
-  backgroundStyleKey: string;  // 배경 스타일 키
-  backgroundArtStyle: string;  // 배경 아트 스타일 텍스트
-  latestEpisodeAt: Date;       // 최신 회차 업로드 시각 (정렬용)
-  createdAt: Date;
-}
-```
-
-### 2.3 `episode` (신규)
-
-```typescript
-@Entity('episode')
-class Episode {
-  id: string;                  // PK: UUID v4 (@PrimaryGeneratedColumn('uuid'))
-  seriesId: string;            // FK → series.id (CASCADE DELETE)
-  episodeNumber: number;       // 회차 번호 (1부터 순차 증가)
-  title: string;               // 회차 제목 (VARCHAR 255)
-  status: EpisodeStatus;       // PENDING | PROCESSING | DONE | FAILED
-  errorMessage: string;        // 파이프라인 실패 시 오류 메시지 (nullable)
-  createdAt: Date;
-}
-
-enum EpisodeStatus {
-  PENDING     = 'PENDING',
-  PROCESSING  = 'PROCESSING',
-  DONE        = 'DONE',
-  FAILED      = 'FAILED',
-}
-```
-
-### 2.4 `character` / `background` (novelId → seriesId 변경)
-
-- `novelId` 컬럼을 `seriesId`로 리네임 (`string`, FK → series.id)
-- 캐릭터·배경은 **series 레벨** 유지 (회차 간 공유)
-- `id`: 기존 수동 패턴(`{novelId}_char_{idx}`) → **UUID v4** (`@PrimaryGeneratedColumn('uuid')`)
-  - 기존 `character_img.characterId`(FK) 도 UUID string 그대로 호환
-
-### 2.5 `character_img` — 변경 없음
-
-### 2.6 Entity Relationship Diagram
-
-```
-user (1) ──────< series (N)
-                    │
-                    ├──────< episode (N)         [seriesId + episodeNumber UNIQUE]
-                    │
-                    ├──────< character (N)
-                    │             └──────< character_img (N)  [PK: characterId + emotion]
-                    │
-                    └──────< background (N)
-```
-
----
-
-## 3. S3 구조 변경
-
-```
-n2vn-bucket/
-└── series/{seriesId}/
-    ├── characters/
-    │   ├── {charId}_DEFAULT.png
-    │   ├── {charId}_DEFAULT_NOBG.png
-    │   └── ...
-    ├── backgrounds/
-    │   └── {bgId}.png
-    └── episodes/{episodeNumber}/
-        ├── novel.txt          ← 회차 원본 텍스트 (API 업로드)
-        └── scenes.json        ← 회차별 씬 파싱 결과
-```
-
----
-
-## 4. 백엔드 API 설계
-
-### 4.1 인증 (`/auth`)
-
-| Method | Path | 설명 |
-|---|---|---|
-| `POST` | `/auth/register` | 회원가입 (body: email, password, nickname) |
-| `POST` | `/auth/login` | 로그인 → JWT 반환 |
-| `GET` | `/auth/me` | 내 정보 조회 (JWT 필요) |
-
-- JWT Guard: 보호 라우트에 `@UseGuards(JwtAuthGuard)` 적용
-- 비밀번호: bcrypt 해시 저장
-
-### 4.2 Series (`/series`)
-
-| Method | Path | 인증 | 설명 |
+| 항목 | Mubert API | **Lyria 3 Clip** | Lyria 3 Pro |
 |---|---|---|---|
-| `GET` | `/series` | 불필요 | 전체 작품 목록 (독자용, 최신 회차 업로드순) |
-| `GET` | `/series/mine` | 필요 | 내 작품 목록 (작가용) |
-| `POST` | `/series` | 필요 | 새 작품 생성 (body: title, description?) |
-| `GET` | `/series/:id` | 불필요 | 작품 상세 + 회차 목록 |
-| `GET` | `/series/:id/assets` | 불필요 | 캐릭터·배경 에셋 조회 (S3 URL 포함) |
+| **가격** | $49/월 구독 (최소) | **$0.04/클립** | $0.08/트랙 |
+| **에피소드당 비용** (BGM 7개 기준) | $49 고정 | **$0.28** | $0.56 |
+| **생성 길이** | 최대 25분 | **30초** | ~풀 송 길이 |
+| **출력 포맷** | MP3 | **MP3 48kHz stereo** | MP3 48kHz stereo |
+| **텍스트/이미지 프롬프트** | 텍스트만 | **텍스트·이미지** | 텍스트·이미지 |
+| **루프 최적화** | 네이티브 루프 | **명시적 루프 최적화** | ✗ (풀 송 구조) |
+| **VN BGM 적합성** | ✓ 게임 특화 | **✓ 루프·클립 특화** | ✗ 벌스/코러스 구조 |
+| **기존 API 키 재사용** | ✗ (신규 계정) | **✓ (GEMINI_API_KEY)** | ✓ (GEMINI_API_KEY) |
 
-### 4.3 Episode (`/series/:id/episodes`)
+#### 선정 근거
 
-| Method | Path | 인증 | 설명 |
-|---|---|---|---|
-| `POST` | `/series/:id/episodes` | 필요 (본인) | 회차 추가 + 파이프라인 자동 실행 (multipart: title, file) |
-| `GET` | `/series/:id/episodes/:num` | 불필요 | 회차 상세 (status, createdAt) |
-| `GET` | `/series/:id/episodes/:num/vn-script` | 불필요 | 비주얼 노벨 스크립트 반환 |
-| `DELETE` | `/series/:id/episodes/:num` | 필요 (본인) | 회차 삭제 |
+- **Mubert**: 게임 BGM에 특화되어 있으나, **월 $49 구독료**가 소규모 연구 프로젝트에 비경제적.
+- **Lyria 3 Pro**: "여러 벌스·코러스·브리지를 갖춘 전체 길이의 노래"에 최적화된 모델. 반복 재생용 배경음악보다는 노래 제작에 적합하여 VN BGM 용도와 맞지 않음.
+- **Lyria 3 Clip**: "짧은 음악 클립, 루프, 미리보기"에 명시적으로 최적화. 30초 클립은 HTML `<audio loop>`로 무한 반복하면 VN BGM으로 충분하며, 루프 구조를 고려한 생성이 보장됨.
 
-#### 회차 추가 제약
-- `episodeNumber = 현재 최대 episodeNumber + 1` (순차 강제)
-- PROCESSING 상태의 회차가 이미 있으면 409 Conflict 반환 (중복 업로드 방지)
+**확정 서비스: Google Lyria 3 Clip (Gemini API)**
 
-### 4.4 기존 Parsing / Image API
+공식 문서 기준 루프·클립 생성에 특화된 모델. 기존 Gemini 2.5 Flash와 동일한 API 키·빌링으로 운영 가능하며, 30초 클립을 프론트엔드 `<audio loop>`로 반복 재생한다. 에피소드당 비용이 약 $0.28로 Pro 대비 50% 절감.
 
-- 외부 직접 호출 비활성화 (or 내부 전용으로 유지)
-- `EpisodePipelineService`가 내부적으로 호출하는 구조로 리팩토링
+### 2.6 BGM 파일 규격
 
----
-
-## 5. 자동 파이프라인 (`EpisodePipelineService`)
-
-```
-POST /series/:id/episodes
-  1. episode 레코드 생성 (status: PROCESSING)
-  2. novel.txt → S3 업로드: series/{seriesId}/episodes/{epNum}/novel.txt
-  3. 비동기 Fire-and-Forget 파이프라인 시작
-
-  [비동기]
-  Step A. 캐릭터 파싱 (기존 series 캐릭터에 병합, 신규만 추가)
-  Step B. 배경 파싱 (기존 배경에 병합, 신규만 추가)
-  Step C. 씬 파싱 → series/{seriesId}/episodes/{epNum}/scenes.json
-            + character_img 플레이스홀더 생성 (신규 감정만)
-  Step D. 이미지 생성 (genId=null인 character_img 대상)
-  Step E. 배경 이미지 생성 (genId=null인 background 대상)
-  Step F. episode.status = DONE
-
-  오류 발생 시: episode.status = FAILED, errorMessage 저장
-```
-
-### 캐릭터/배경 파싱 병합 전략
-
-**문제:** LLM 호출마다 동일 캐릭터의 이름이 다르게 추출될 수 있음 (예: "백천" ↔ "사도 백천").
-단순 이름 문자열 비교로는 중복을 판별할 수 없음.
-
-**해결:** 캐릭터 파싱 프롬프트에 기존 캐릭터 목록을 함께 전달 → LLM이 **신규 캐릭터만** 반환하도록 지시.
-
-```
-캐릭터 파싱 프롬프트 입력:
-  novel_text:          현재 회차 소설 텍스트
-  existing_characters: "- ID: {uuid}, Name: 백천, Sex: male, Look: ..."
-                       "- ID: {uuid}, Name: 설화, Sex: female, Look: ..."
-
-LLM 지시사항 추가:
-  - existing_characters에 이미 존재하는 인물(별칭·존칭·호칭이 달라도 동일 인물이면 제외)은 출력하지 말 것.
-  - 완전히 새로운 인물만 characters 필드에 포함할 것.
-  - 기존 인물이라고 판단한 근거(매핑 관계)를 별도 필드로 반환하지 않아도 됨.
-```
-
-**DB 병합 흐름:**
-```
-1. series의 기존 character 목록 조회
-2. existing_characters 문자열로 포맷화하여 프롬프트에 포함
-3. LLM 응답 = 신규 캐릭터만 포함된 목록
-4. 응답의 각 캐릭터를 UUID 신규 생성하여 INSERT
-5. 기존 캐릭터는 건드리지 않음 (look 업데이트도 하지 않음)
-```
-
-> 배경도 동일 전략 적용 (existing_backgrounds를 프롬프트에 전달)
+| 항목 | 규격 |
+|---|---|
+| 포맷 | MP3 (48kHz stereo, Lyria 기본 출력) |
+| 길이 | 30초 (Lyria 3 Clip 고정 출력) |
+| 루프 처리 | 프론트엔드 `<audio loop>` (브라우저 레벨) |
+| 저장 경로 | S3: `series/{seriesId}/bgm/{bgmId}.mp3` |
 
 ---
 
-## 6. 프론트엔드 구조
+## 3. 배경 이미지 최적화 기획
 
-### 6.1 페이지 구성
+### 3.1 문제 정의
 
-| 페이지 | 경로 | 설명 |
+현재 흐름:
+```
+Step 3: 배경 파싱 → 배경 6개 생성 (DB 저장)
+Step 4: 씬 파싱 → 실제로 4개 배경만 씬에 사용
+Step 6: 배경 이미지 생성 → 6개 전체 이미지 생성 (2개 낭비)
+```
+
+개선 후 흐름 (BGM과 동일한 패턴):
+```
+Step 3: POST /parsing/backgrounds 제거
+Step 4: 씬 파싱 시점에 BGM과 동일하게 배경 매칭/신규 생성 결정
+  └── new_bg_{n} 임시 ID → DB INSERT → 실제 ID 발급 → scenes.json 치환
+  └── 신규 배경 이미지 생성 트리거 (비동기)
+```
+
+### 3.2 BGM과 동일한 배경 식별 전략
+
+```
+씬 파싱 시점에 Gemini가 각 씬의 배경을 결정
+  ↓
+LLM이 기존 background 목록(id + name + description)을 참고하여
+  ┌── 어울리는 배경이 있으면 → 기존 background ID 반환 (재사용)
+  └── 없으면 → new_bg_{n} 임시 ID + name + description 생성
+```
+
+**재사용 판단 기준:**
+- 동일 소설 내 이미 생성된 배경과 장소/분위기가 동일
+- 시간대(timeOfDay)가 달라도 동일 장소라면 재사용 (시간대는 이미지 프롬프트에 오버레이)
+
+### 3.3 배경 데이터 생애주기
+
+```
+1단계: 씬 파싱 (LLM)
+  └── 씬별 backgroundId 결정
+  └── 기존 background와 매칭 또는 new_bg_{n} 임시 ID 할당
+  └── new_bg_{n} 에는 name + description도 함께 생성
+
+2단계: DB 적재 + ID 발급
+  └── new_bg_{n} → background 테이블 INSERT → 실제 ID ({novelId}_bg_{idx}) 발급
+  └── scenes.json의 임시 ID를 실제 ID로 일괄 치환 → S3 재저장
+
+3단계: 배경 이미지 생성 (비동기)
+  └── 신규 background ID만 Leonardo AI 이미지 생성 트리거
+  └── 생성된 이미지 S3 업로드 + DB genId 업데이트
+```
+
+### 3.4 개선된 파이프라인 전체 흐름
+
+```
+[사전] S3에 novel.txt 업로드
+
+Step 1: POST /novels
+  └── novel 레코드 생성
+
+Step 2: POST /parsing/characters
+  └── Gemini → 캐릭터 파싱 → character 레코드 생성
+
+Step 3: POST /parsing/scenes  ← [핵심 변경 지점] (배경 파싱 Step 흡수)
+  └── Gemini → 씬 파싱
+        입력: 소설 원문 + 기존 background 목록 (id + name + description)
+  └── [배경] 기존 매칭 또는 new_bg_{n} + name + description 생성
+        → DB INSERT → 실제 ID 발급 → scenes.json 치환
+        → 신규 배경 이미지 생성 트리거 (비동기)
+  └── [BGM] 기존 매칭 또는 new_bgm_{n} + prompt 생성
+        → DB INSERT → UUID 발급 → scenes.json 치환
+        → BGM 음원 생성 트리거 (비동기)
+  └── scenes.json S3 저장
+
+Step 4: POST /images/characters
+  └── 캐릭터 이미지 생성 (기존과 동일)
+
+Step 5: GET /novels/:id/assets
+  └── 캐릭터 이미지 + 배경 이미지 + BGM URL 반환
+
+Step 6: GET /novels/:id/vn-script
+  └── scenes.json + DB 조합 → VN 스크립트 반환 (bgmId 포함)
+```
+
+> `POST /parsing/backgrounds` 엔드포인트는 **제거**한다. 배경 파싱은 씬 파싱에 완전히 통합된다.
+
+---
+
+## 4. scenes.json 스키마 변경
+
+### 4.1 현재 스키마 (씬 단위)
+
+```json
+{
+  "backgroundId": "1_bg_1",
+  "timeOfDay": "dawn",
+  "bgm_prompt": "tense orchestral music with light percussion",
+  "dialogues": [...]
+}
+```
+
+### 4.2 개선 스키마
+
+```json
+{
+  "backgroundId": "1_bg_1",
+  "timeOfDay": "dawn",
+  "bgmId": "uuid-xxxx-xxxx",
+  "dialogues": [...]
+}
+```
+
+- `bgm_prompt` 필드는 DB의 `bgm` 테이블에 저장 (런타임 불필요)
+- `bgmId`는 DB에서 UUID를 발급받은 후 치환 저장
+
+---
+
+## 5. 비주얼 노벨 플레이어 BGM 재생 기획
+
+### 5.1 재생 규칙
+
+| 상황 | BGM 동작 |
+|---|---|
+| 씬 전환 시 bgmId 변경 | 현재 BGM 페이드아웃 → 새 BGM 페이드인 |
+| 씬 전환 시 bgmId 동일 | BGM 중단 없이 계속 재생 (매끄러운 연속성) |
+| 소설 시작 | 첫 씬의 BGM 자동 재생 |
+| `end` 명령 | BGM 페이드아웃 |
+| 음소거 상태에서 씬 전환 | BGM 교체는 수행하되 소리는 내지 않음 |
+| 음소거 해제 | 현재 씬의 BGM 즉시 재생 |
+
+### 5.2 VN 스크립트 명령어 추가
+
+```
+# 씬 전환 시 BGM ID가 다를 때만 명령 삽입
+play bgm {bgmId}
+```
+
+### 5.3 플레이어 에셋 응답 구조 추가
+
+`GET /novels/:id/vn-script` 응답에 BGM URL 맵 추가:
+
+```json
+{
+  "bgm": {
+    "uuid-xxxx": "https://.../{novelId}/bgm/uuid-xxxx.mp3"
+  }
+}
+```
+
+### 5.4 사운드 토글 UI
+
+플레이어 화면 우측 상단에 사운드 토글 버튼을 고정 배치한다.
+
+**UI 사양:**
+
+| 항목 | 내용 |
+|---|---|
+| 위치 | 플레이어 우측 상단 고정 (position: absolute) |
+| 켜짐 상태 | 스피커 아이콘 (🔊) |
+| 꺼짐 상태 | 음소거 아이콘 (🔇) |
+| 상태 유지 | localStorage에 저장 — 페이지 새로고침 후에도 유지 |
+| 초기값 | 켜짐 (소설 시작 시 BGM 자동 재생) |
+
+**동작 정의:**
+
+| 액션 | 결과 |
+|---|---|
+| 켜짐 → 끔 | 현재 재생 중인 BGM 즉시 음소거 (pause 또는 volume 0) |
+| 꺼짐 → 켬 | 현재 씬의 BGM 즉시 재생 |
+| 음소거 상태에서 씬 전환 | 내부 bgmId는 갱신하되 소리는 내지 않음 |
+
+---
+
+## 6. 새로운 DB 엔티티: `bgm` 테이블
+
+| 필드 | 타입 | 설명 |
 |---|---|---|
-| 독자 메인 | `/` (index.html) | 전체 작품 리스트 |
-| 작품 상세 | `/series.html?id=:id` | 작품 소개 + 회차 목록 |
-| VN 플레이어 | 전체화면 모달 | 회차 비주얼 노벨 재생 |
-| 내 작품 | `/mine.html` | 작가 관리 화면 |
-
-> SPA 라우팅 없이 정적 HTML 파일 방식 유지 (기존 구조 계승)
-
-### 6.2 독자 화면 — 메인 (`index.html`)
-
-**작품 카드 리스트:**
-- 작품 썸네일(캐릭터 DEFAULT 이미지 첫 번째), 제목, 작가, 최신 회차 업로드 일자, 총 회차 수
-
-**정렬 우선순위 (복합 정렬):**
-1. 최근 읽은 작품을 상위 (로컬스토리지 `lastReadAt` 기준)
-2. 동률 시 최신 회차 업로드일(`latestEpisodeAt`) 기준 내림차순
-
-**탭/필터:**
-- 전체 / 최신 업데이트 / 내가 읽은 작품
-
-### 6.3 독자 화면 — 작품 상세 (`series.html`)
-
-- 작품 설명 섹션
-- 회차 목록:
-  - 회차 번호, 제목, 업로드 날짜
-  - **읽은 회차는 회색(opacity 낮춤) 처리** (로컬스토리지 `readEpisodes: {seriesId: [epNum, ...]}`)
-  - PROCESSING 상태 회차: "생성 중..." 배지, 클릭 불가
-  - FAILED 상태 회차: "생성 실패" 배지
-- 회차 클릭 → VN 플레이어 모달 오픈
-
-### 6.4 VN 플레이어 (모달)
-
-- 전체화면 모달 (z-index 최상위, 배경 스크롤 잠금)
-- 닫기: ESC 키 또는 우상단 X 버튼
-- 닫힐 때 읽기 이력 로컬스토리지 저장
-- **커스텀 VN 엔진** (`player.html` + `player.js`) 재사용
-  - `player.html`을 iframe으로 임베드, postMessage로 `{ seriesId, episodeNumber }` 전달
-  - `player.js`가 `GET /series/:id/episodes/:num/vn-script` 호출 후 엔진 초기화
-  - 스크립트 포맷 그대로 유지: `show scene`, `show character`, `hide character`, narrator string, `{ 이름: 대사 }` 객체, `'end'`
-
-### 6.5 작가 화면 (`mine.html`)
-
-**미로그인 시:** 로그인 유도 화면
-
-**내 작품 리스트:**
-- 작품별 카드 (제목, 총 회차, 최신 업로드일)
-- "+ 새 작품 만들기" 버튼
-
-**작품 상세 (모달 또는 하위 섹션):**
-- 에셋 탭: 캐릭터 감정별 이미지 갤러리, 배경 이미지 갤러리
-- 회차 탭:
-  - 회차 목록 (번호, 제목, 상태 배지, 생성일)
-  - "+ 다음 회차 추가" 버튼 (PROCESSING 중이면 비활성화)
-  - 회차 삭제 버튼 (확인 다이얼로그 포함)
-  - 파이프라인 진행 상태: PROCESSING 중 폴링 (3초 간격, `GET /series/:id/episodes/:num`)
-  - **5단계 진행도 표시**: 각 단계별 상태(대기 / 진행 중 / 완료 / 실패)를 스텝 인디케이터로 표시
-
-    ```
-    ① 캐릭터 분석  ✓ 완료
-    ② 배경 분석    ✓ 완료
-    ③ 씬 분석      ⟳ 진행 중
-    ④ 캐릭터 이미지 생성  ○ 대기
-    ⑤ 배경 이미지 생성    ○ 대기
-    ```
-
-  - 단계가 FAILED이면 해당 단계에 오류 표시 + 해당 단계만 재실행 버튼 노출
-
-**회차 추가 흐름:**
-1. 제목 입력 + 텍스트 파일(.txt) 업로드 폼
-2. 업로드 클릭 → `POST /series/:id/episodes` (multipart/form-data)
-3. 즉시 "생성 중..." 상태 표시, 폴링 시작
-4. DONE/FAILED 전환 시 배지 업데이트
+| `id` | UUID (PK) | 자동 발급 |
+| `novelId` | number (FK) | 소속 소설 |
+| `category` | enum | ACTION / ROMANCE / MYSTERY 등 |
+| `prompt` | TEXT | LLM이 생성한 bgm_prompt |
+| `genId` | string (nullable) | BGM AI 생성 작업 ID |
+| `filePath` | string (nullable) | S3 저장 경로 |
 
 ---
 
-## 7. 인증 전략
+## 7. 사용자 경험 개선 포인트
 
-- **JWT (Access Token):** 만료 24시간, Authorization 헤더 Bearer 방식
-- **프론트엔드 저장:** `localStorage.token`
-- **로그인:** `loginId` + `password` 조합으로 인증
-- **회원가입 입력 필드:** loginId (영문/숫자, UNIQUE), email, password, nickname
-- **로그인 UI:** 헤더 우상단 로그인/로그아웃 버튼 (index.html, mine.html 공통)
-- 회원가입·로그인은 모달 또는 별도 `login.html`
+### 7.1 독자 관점
+
+- 씬 전환마다 분위기에 맞는 음악이 자동 재생됨
+- 유사한 분위기가 이어질 때 음악이 끊기지 않아 몰입감 유지
+- 소설 장르(무협, 판타지, 로맨스)에 걸맞은 음악 색채
+
+### 7.2 창작자 관점 (추후 기능)
+
+- 씬별 배정된 BGM 카테고리 확인 가능
+- 원하는 BGM 카테고리로 재생성 요청 가능
 
 ---
 
-## 8. 기존 문제 해결 현황
+## 8. 처리 순서 및 의존 관계 정리
 
-| # | 기존 문제 | 이번 버전에서 해결 여부 |
+배경과 BGM은 씬 파싱 내에서 완전히 동일한 패턴으로 처리된다.
+
+```
+씬 파싱 요청 수신
+  │
+  ├─[1] LLM 씬 분석
+  │       입력: 소설 원문
+  │             + 기존 background 목록 (id + name + description)
+  │             + 기존 BGM 목록 (id + category + prompt)
+  │       출력: 씬별 backgroundId or new_bg_{n} + name + description
+  │             씬별 bgmId or new_bgm_{n} + category + prompt
+  │             dialogues
+  │
+  ├─[2] 배경 중복 제거 + ID 할당  ←── BGM과 동일 패턴
+  │       ├── 기존 background와 매칭 → 기존 ID 재사용
+  │       └── 신규 → new_bg_{n} 임시 할당 (name + description 보유)
+  │
+  ├─[3] BGM 중복 제거 + ID 할당  ←── 배경과 동일 패턴
+  │       ├── 기존 BGM과 매칭 → 기존 ID 재사용
+  │       └── 신규 → new_bgm_{n} 임시 할당 (category + prompt 보유)
+  │
+  ├─[4] DB 적재 + ID 치환
+  │       ├── new_bg_{n}  → background INSERT → 실제 ID 발급
+  │       ├── new_bgm_{n} → bgm INSERT → UUID 발급
+  │       └── scenes.json의 임시 ID 전체 치환 → S3 저장
+  │
+  └─[5] 비동기 생성 트리거 (Fire-and-Forget)
+          ├── 신규 background ID → Leonardo AI 이미지 생성
+          └── 신규 bgm UUID → Lyria 3 Clip API 음원 생성
+```
+
+---
+
+## 9. 변경에 따른 API 정리
+
+| Method | Path | 변경사항 |
 |---|---|---|
-| 1 | N+1 쿼리 (getNovelAssets) | 함께 수정 (In 단일 쿼리화) |
-| 3 | synchronize: true | 마이그레이션 도입으로 해결 |
-| 4 | 이미지 생성 진행 상황 추적 불가 | 5단계 개별 진행도 폴링으로 완전 해결 |
-| 6 | novel.txt 수동 S3 업로드 | 회차 업로드 API로 완전 해결 |
-
----
-
-## 9. 구현 단계 (Phase)
-
-### Phase 1 — 백엔드 기반 (우선)
-1. TypeORM 마이그레이션 도입, `novel` → `series` 리네임, `episode` 테이블 추가
-2. `user` 테이블 + JWT 인증 모듈 구현
-3. Series CRUD API 구현
-4. Episode 추가/삭제 API + `EpisodePipelineService` 구현
-5. `getVnScript`를 episode 레벨로 수정 (`/series/:id/episodes/:num/vn-script`)
-
-### Phase 2 — 프론트엔드
-6. 독자 메인 (`index.html`) — 작품 목록, 정렬, 로그인 헤더
-7. 작품 상세 (`series.html`) — 회차 목록, 읽기 이력, VN 플레이어 모달
-8. 작가 관리 (`mine.html`) — 내 작품, 회차 추가, 파이프라인 폴링
-
-### Phase 3 — 완성도
-9. 에러 핸들링 (파이프라인 FAILED 재시도, API 에러 토스트)
-10. UI 정교화 (로딩 스피너, 반응형)
+| `POST` | `/parsing/backgrounds` | **제거** — 씬 파싱에 통합 |
+| `POST` | `/parsing/scenes` | 배경 매칭/신규 생성 + BGM 매칭/신규 생성 통합. DB 적재 + 비동기 트리거 추가 |
+| `POST` | `/bgm/generate` | 신규 — BGM 음원 생성 엔드포인트 (비동기, 내부 트리거용) |
+| `POST` | `/images/backgrounds` | 씬 파싱에서 자동 트리거로 변경. 수동 호출은 재생성 용도로만 유지 |
+| `GET` | `/novels/:id/vn-script` | 응답에 `bgm` URL 맵 추가 |
+| `GET` | `/novels/:id/assets` | 응답에 BGM 에셋 목록 추가 |
