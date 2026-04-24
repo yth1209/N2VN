@@ -12,12 +12,6 @@ export class ParsingController {
     return { success: true, message: '캐릭터 파싱 완료' };
   }
 
-  @Post('backgrounds')
-  async parseBackgrounds(@Body() dto: ParseEpisodeDto) {
-    await this.parsingService.parseBackgroundsForEpisode(dto.seriesId, dto.episodeNumber);
-    return { success: true, message: '배경 파싱 완료' };
-  }
-
   @Post('scenes')
   async parseScenes(@Body() dto: ParseEpisodeDto) {
     await this.parsingService.parseScenesForEpisode(dto.seriesId, dto.episodeNumber);

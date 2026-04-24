@@ -4,11 +4,21 @@ let vnScript   = [];
 let scriptIndex = 0;
 let characters  = {};   // { charId: { name, sprites: { emotion: url } } }
 let scenes      = {};   // { bgId: url }
+let bgmMap      = {};   // { bgmId: url | null }
 let onScreen    = {};   // { charId: { emotion, position } }
 
 let isTyping   = false;
 let typeTimer  = null;
 let fullText   = '';
+
+// ── BGM State ──────────────────────────────────────
+const bgmAudio      = new Audio();
+let   isMuted       = false;
+let   currentBgmId  = null;
+
+const FADE_DURATION_MS = 1000;
+const FADE_STEP_MS     = 50;
+const FADE_STEPS       = FADE_DURATION_MS / FADE_STEP_MS;
 
 // ── DOM ────────────────────────────────────────────
 const loadingEl     = document.getElementById('loading-overlay');
@@ -47,10 +57,13 @@ async function loadScript(seriesId, episodeNumber) {
 
     characters  = result.data.characters;
     scenes      = result.data.scenes;
+    bgmMap      = result.data.bgm ?? {};
     vnScript    = result.data.script;
     scriptIndex = 0;
     onScreen    = {};
+    currentBgmId = null;
 
+    initSoundState();
     loadingEl.classList.add('hidden');
     setupInput();
     processNext(); // 자동 시작
@@ -97,6 +110,19 @@ function processNext() {
 function executeCommand(cmd) {
   if (typeof cmd === 'string') {
     if (cmd === 'end') { showEnd(); return false; }
+
+    // play bgm {bgmId}
+    const bgmMatch = cmd.match(/^play bgm (\S+)/);
+    if (bgmMatch) {
+      playBgm(bgmMatch[1]);
+      return false;
+    }
+
+    // stop bgm
+    if (cmd === 'stop bgm') {
+      fadeBgm(0).then(() => { bgmAudio.pause(); currentBgmId = null; });
+      return false;
+    }
 
     // show scene {bgId} [with fade]
     const bgMatch = cmd.match(/^show scene (\S+)/);
@@ -248,3 +274,62 @@ function showEnd() {
   clearHighlights();
   endScreen.style.display = 'flex';
 }
+
+// ── BGM ────────────────────────────────────────────
+function initSoundState() {
+  isMuted = localStorage.getItem('n2vn_muted') === 'true';
+  const btn = document.getElementById('sound-toggle-btn');
+  if (btn) btn.textContent = isMuted ? '🔇' : '🔊';
+  bgmAudio.muted = isMuted;
+}
+
+async function playBgm(bgmId) {
+  if (bgmId === currentBgmId) return; // 동일 BGM → 그대로 재생
+
+  const url = bgmMap[bgmId];
+
+  // 현재 재생 중이면 페이드아웃 후 정지
+  if (!bgmAudio.paused) {
+    await fadeBgm(0);
+    bgmAudio.pause();
+  }
+
+  currentBgmId = bgmId;
+
+  if (!url) return; // 미생성 BGM → 무음으로 계속
+
+  bgmAudio.src    = url;
+  bgmAudio.loop   = true;
+  bgmAudio.volume = 0;
+  bgmAudio.muted  = isMuted;
+  bgmAudio.play().catch(() => {}); // autoplay 정책 무시
+  await fadeBgm(0.6);
+}
+
+function fadeBgm(targetVolume) {
+  return new Promise((resolve) => {
+    const startVolume = bgmAudio.volume;
+    const delta       = (targetVolume - startVolume) / FADE_STEPS;
+    let   step        = 0;
+
+    const interval = setInterval(() => {
+      step++;
+      bgmAudio.volume = Math.min(1, Math.max(0, startVolume + delta * step));
+      if (step >= FADE_STEPS) {
+        bgmAudio.volume = targetVolume;
+        clearInterval(interval);
+        resolve();
+      }
+    }, FADE_STEP_MS);
+  });
+}
+
+// 사운드 토글 버튼 이벤트
+document.getElementById('sound-toggle-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation(); // VN container click 이벤트 방지
+  isMuted = !isMuted;
+  localStorage.setItem('n2vn_muted', String(isMuted));
+  const btn = document.getElementById('sound-toggle-btn');
+  if (btn) btn.textContent = isMuted ? '🔇' : '🔊';
+  bgmAudio.muted = isMuted;
+});

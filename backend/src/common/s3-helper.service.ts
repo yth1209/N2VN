@@ -89,4 +89,21 @@ export class S3HelperService {
       throw new HttpException(`Failed to upload image to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+
+  async uploadAudio(objectKey: string, buffer: Buffer, mimeType: string = 'audio/mpeg'): Promise<void> {
+    try {
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        Body: buffer,
+        ContentType: mimeType,
+        ServerSideEncryption: 'AES256',
+      });
+      await this.s3Client.send(command);
+      this.logger.log(`Saved audio to S3: ${objectKey}`);
+    } catch (error) {
+      this.logger.error(`S3 오디오 업로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to upload audio to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }

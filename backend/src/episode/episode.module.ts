@@ -5,9 +5,10 @@ import { EpisodePipelineService } from './episode-pipeline.service';
 import { AuthModule } from '../auth/auth.module';
 import { ParsingModule } from '../parsing/parsing.module';
 import { ImageModule } from '../image/image.module';
+import { BgmModule } from '../bgm/bgm.module';
 
 @Module({
-  imports: [AuthModule, ParsingModule, ImageModule],
+  imports: [AuthModule, ParsingModule, ImageModule, BgmModule],
   controllers: [EpisodeController],
   providers: [EpisodeService, EpisodePipelineService],
 })

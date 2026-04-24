@@ -170,8 +170,17 @@ export class EpisodeService {
       if (bg.genId) sceneMap[bg.id] = `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png`;
     }
 
+    // BGM 맵
+    const bgmList = await this.repo.bgm.find({ where: { seriesId } });
+    const bgmMap: Record<string, string | null> = {};
+    for (const bgm of bgmList) {
+      bgmMap[bgm.id] = bgm.genId
+        ? `${baseUrl}/series/${seriesId}/bgm/${bgm.id}.mp3`
+        : null;
+    }
+
     const script = this.buildVnScript(scenesData.scenes, characterMap);
-    return { characters: characterMap, scenes: sceneMap, script };
+    return { characters: characterMap, scenes: sceneMap, bgm: bgmMap, script };
   }
 
   private buildVnScript(
@@ -179,8 +188,14 @@ export class EpisodeService {
     characterMap: VnCharacterMap,
   ): (string | Record<string, string>)[] {
     const script: (string | Record<string, string>)[] = [];
+    let currentBgmId: string | null = null;
 
     for (const scene of scenes) {
+      // bgmId가 변경된 경우에만 play bgm 명령 삽입
+      if (scene.bgmId && scene.bgmId !== currentBgmId) {
+        script.push(`play bgm ${scene.bgmId}`);
+        currentBgmId = scene.bgmId;
+      }
       script.push(`show scene ${scene.backgroundId} with fade`);
       const onScreen = new Map<string, { emotion: string; position: string }>();
 
@@ -221,6 +236,7 @@ export class EpisodeService {
       onScreen.clear();
     }
 
+    script.push('stop bgm');
     script.push('end');
     return script;
   }

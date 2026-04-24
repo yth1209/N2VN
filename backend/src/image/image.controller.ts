@@ -6,14 +6,14 @@ export class ImageController {
   constructor(private readonly imageService: ImageService) {}
 
   @Post('characters')
-  async generateCharacterImages(@Body('seriesId') seriesId: string) {
-    this.imageService.generateCharacterImages(seriesId).catch(() => {});
+  async generateCharacterImages(@Body('seriesId') seriesId: string, @Body('episodeNumber') episodeNumber?: number) {
+    this.imageService.generateCharacterImages(seriesId, episodeNumber).catch(() => {});
     return { success: true, message: '캐릭터 이미지 생성이 백그라운드에서 시작되었습니다.' };
   }
 
   @Post('backgrounds')
-  async generateBackgroundImages(@Body('seriesId') seriesId: string) {
-    this.imageService.generateBackgroundImages(seriesId).catch(() => {});
+  async generateBackgroundImages(@Body('seriesId') seriesId: string, @Body('episodeNumber') episodeNumber?: number) {
+    this.imageService.generateBackgroundImagesForSeries(seriesId, episodeNumber).catch(() => {});
     return { success: true, message: '배경 이미지 생성이 백그라운드에서 시작되었습니다.' };
   }
 }

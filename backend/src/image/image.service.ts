@@ -1,41 +1,42 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import { IsNull } from 'typeorm';
 import { S3HelperService } from '../common/s3-helper.service';
+import { GenAIHelperService } from '../common/gen-ai-helper.service';
 import { Emotion, STYLE_UUIDS } from '../common/constants';
 import { RepositoryProvider } from '../common/repository.provider';
 import { CharacterImg } from '../entities/character-img.entity';
 import { getCharacterPrompt } from './prompt/prompt';
+import { StepKey, StepStatus } from '../entities/episode-pipeline-step.entity';
 
 @Injectable()
 export class ImageService {
   private readonly logger = new Logger(ImageService.name);
-  private readonly apiKey: string;
 
   constructor(
-    private readonly configService: ConfigService,
     private readonly s3HelperService: S3HelperService,
+    private readonly genAI: GenAIHelperService,
     private readonly repo: RepositoryProvider,
-  ) {
-    this.apiKey =
-      this.configService.get<string>('LEONARDO_AI_API_KEY') ||
-      this.configService.get<string>('LEONARDO_API_KEY') ||
-      '';
+  ) {}
+
+
+  async generateCharacterImages(seriesId: string, episodeNumber?: number): Promise<void> {
+    const episode = episodeNumber != null ? await this.repo.episode.findOneBy({ seriesId, episodeNumber }) : null;
+    const episodeId = episode?.id;
+    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_CHARACTER_IMAGES, StepStatus.PROCESSING, { startedAt: new Date() });
+
+    try {
+      await this._generateCharacterImages(seriesId);
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_CHARACTER_IMAGES, StepStatus.DONE, { finishedAt: new Date() });
+    } catch (err: any) {
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_CHARACTER_IMAGES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
+      throw err;
+    }
   }
 
-  private getHeaders() {
-    return {
-      accept: 'application/json',
-      'content-type': 'application/json',
-      authorization: `Bearer ${this.apiKey}`,
-    };
-  }
-
-  async generateCharacterImages(seriesId: string): Promise<void> {
+  private async _generateCharacterImages(seriesId: string): Promise<void> {
     const series = await this.repo.series.findOne({ where: { id: seriesId } });
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
-    // bug #2 수정: seriesId 기준으로 필터링 후 genId IS NULL인 항목만 조회
     const pendingImages = await this.repo.characterImg
       .createQueryBuilder('ci')
       .innerJoinAndSelect('ci._characterFk', 'c')
@@ -48,10 +49,9 @@ export class ImageService {
       return;
     }
 
-    const charGroups = Map.groupBy(pendingImages, (pi) => pi.characterId);
-
-    const globalArtStyle   = series.characterArtStyle || '';
-    const actualStyleKey   = series.characterStyleKey || 'DYNAMIC';
+    const charGroups        = Map.groupBy(pendingImages, (pi) => pi.characterId);
+    const globalArtStyle    = series.characterArtStyle || '';
+    const actualStyleKey    = series.characterStyleKey || 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
 
     this.logger.log(
@@ -68,6 +68,64 @@ export class ImageService {
     this.logger.log(`[${seriesId}] 모든 캐릭터 이미지 생성 완료`);
   }
 
+  /**
+   * seriesId의 미생성 배경(genId = null)만 처리. EpisodePipelineService 및 retry에서 호출.
+   */
+  async generateBackgroundImagesForSeries(seriesId: string, episodeNumber?: number): Promise<void> {
+    const episode = episodeNumber != null ? await this.repo.episode.findOneBy({ seriesId, episodeNumber }) : null;
+    const episodeId = episode?.id;
+    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_BACKGROUND_IMAGES, StepStatus.PROCESSING, { startedAt: new Date() });
+
+    try {
+      await this._generateBackgroundImagesForSeries(seriesId);
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_BACKGROUND_IMAGES, StepStatus.DONE, { finishedAt: new Date() });
+    } catch (err: any) {
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_BACKGROUND_IMAGES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
+      throw err;
+    }
+  }
+
+  private async _generateBackgroundImagesForSeries(seriesId: string): Promise<void> {
+    const series = await this.repo.series.findOne({ where: { id: seriesId } });
+    if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
+
+    const backgrounds = await this.repo.background.find({ where: { seriesId, genId: IsNull() } });
+    if (!backgrounds.length) {
+      this.logger.log(`[${seriesId}] 생성할 배경 이미지 없음`);
+      return;
+    }
+
+    const globalBgArtStyle  = series.backgroundArtStyle ?? '';
+    const actualStyleKey    = series.backgroundStyleKey  ?? 'DYNAMIC';
+    const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] ?? STYLE_UUIDS['DYNAMIC'];
+
+    this.logger.log(`[${seriesId}] 신규 배경 이미지 생성: ${backgrounds.length}개`);
+
+    await Promise.all(
+      backgrounds.map(async (bg) => {
+        try {
+          const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
+          const { buffer, imageId } = await this.genAI.leonardoGenerateImage(
+            prompt, undefined, selectedStyleUUID, 1280, 720,
+          );
+          await this.s3HelperService.uploadImage(
+            `series/${seriesId}/backgrounds/${bg.id}.png`, buffer, 'image/png',
+          );
+          bg.genId = imageId;
+          await this.repo.background.save(bg);
+          this.logger.log(`[${bg.id}] 배경 이미지 완료`);
+        } catch (err: any) {
+          this.logger.error(`[${bg.id}] 배경 이미지 실패: ${err.message}`);
+        }
+      }),
+    );
+
+    this.logger.log(`[${seriesId}] 배경 이미지 생성 완료`);
+  }
+
+  /**
+   * 전체 배경 수동 재생성용 (genId 있는 것도 포함). 파이프라인 외부에서 사용.
+   */
   async generateBackgroundImages(seriesId: string): Promise<void> {
     const series = await this.repo.series.findOne({ where: { id: seriesId } });
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
@@ -82,13 +140,13 @@ export class ImageService {
     const actualStyleKey    = series.backgroundStyleKey || 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
 
-    this.logger.log(`[${seriesId}] 배경 이미지 생성 시작: ${backgrounds.length}개`);
+    this.logger.log(`[${seriesId}] 배경 이미지 전체 재생성: ${backgrounds.length}개`);
 
     const bgPromises = backgrounds.map(async (bg) => {
-      if (bg.genId) return; // 이미 생성된 배경 건너뜀
+      if (bg.genId) return;
       try {
         const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
-        const { buffer, imageId } = await this.generateImageToBuffer(
+        const { buffer, imageId } = await this.genAI.leonardoGenerateImage(
           prompt, undefined, selectedStyleUUID, 1280, 720,
         );
         await this.s3HelperService.uploadImage(
@@ -121,7 +179,7 @@ export class ImageService {
     if (!defaultImg.genId) {
       this.logger.log(`[${charId}] DEFAULT 이미지 생성 중...`);
       const defaultPrompt = getCharacterPrompt(globalArtStyle, charInfo.look, Emotion.DEFAULT);
-      const { buffer, imageId } = await this.generateImageToBuffer(defaultPrompt, undefined, styleUUID);
+      const { buffer, imageId } = await this.genAI.leonardoGenerateImage(defaultPrompt, undefined, styleUUID);
       defaultImg.genId = imageId;
 
       await this.s3HelperService.uploadImage(
@@ -153,7 +211,7 @@ export class ImageService {
   ): Promise<void> {
     const charId = cimg.characterId;
     const prompt = getCharacterPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion);
-    const { buffer, imageId } = await this.generateImageToBuffer(prompt, initImageId, styleUUID);
+    const { buffer, imageId } = await this.genAI.leonardoGenerateImage(prompt, initImageId, styleUUID);
     cimg.genId = imageId;
 
     await this.s3HelperService.uploadImage(
@@ -165,92 +223,24 @@ export class ImageService {
 
   private async extractAndSaveNobg(seriesId: string, cimg: CharacterImg): Promise<string> {
     const targetName = `${cimg.characterId}_${cimg.emotion}`;
-    let nobgGenId: string;
     try {
-      const nobgRes = await axios.post(
-        'https://cloud.leonardo.ai/api/rest/v1/variations/nobg',
-        { id: cimg.genId },
-        { headers: this.getHeaders() },
-      );
-      const sdNobgJobId = nobgRes.data?.sdNobgJob?.id;
-      if (!sdNobgJobId) { this.logger.warn(`[${targetName}] NOBG Job ID 없음`); return nobgGenId; }
-
-      const nobgUrl = await this.poll(`NOBG [${targetName}]`, async () => {
-        const varRes = await axios.get(
-          `https://cloud.leonardo.ai/api/rest/v1/variations/${sdNobgJobId}`,
-          { headers: this.getHeaders() },
-        );
-        const variants = varRes.data?.generated_image_variation_generic;
-        if (variants?.length > 0) {
-          const nobgVar = variants.find((v: any) => v.transformType === 'NOBG');
-          if (nobgVar?.url) { nobgGenId = nobgVar.id; return nobgVar.url as string; }
-        }
-        return null;
-      });
-
-      if (nobgUrl) {
-        const dlRes = await axios.get(nobgUrl, { responseType: 'arraybuffer' });
-        await this.s3HelperService.uploadImage(
-          `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`, dlRes.data, 'image/png',
-        );
-        this.logger.log(`[${targetName}] NOBG S3 저장 완료`);
+      const nobg = await this.genAI.leonardoNobg(cimg.genId);
+      if (!nobg) {
+        this.logger.warn(`[${targetName}] NOBG 결과 없음`);
+        return undefined;
       }
+
+      const dlRes = await (await import('axios')).default.get(nobg.url, { responseType: 'arraybuffer' });
+      await this.s3HelperService.uploadImage(
+        `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`,
+        dlRes.data,
+        'image/png',
+      );
+      this.logger.log(`[${targetName}] NOBG S3 저장 완료`);
+      return nobg.nobgGenId;
     } catch (err: any) {
       this.logger.error(`[${targetName}] NOBG 실패: ${err.message}`);
+      return undefined;
     }
-    return nobgGenId;
-  }
-
-  private async poll<T>(taskName: string, fn: () => Promise<T | null | undefined>): Promise<T> {
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      const result = await fn();
-      if (result) return result;
-    }
-    throw new Error(`${taskName} timeout after 180s`);
-  }
-
-  private async generateImageToBuffer(
-    prompt: string,
-    initImageId?: string,
-    styleUUID?: string,
-    width = 576,
-    height = 1024,
-  ): Promise<{ buffer: Buffer; imageId: string }> {
-    const payload: any = {
-      model: 'flux-pro-2.0',
-      public: false,
-      parameters: { width, height, quantity: 1, prompt },
-    };
-
-    if (initImageId) {
-      payload.parameters.guidances = {
-        image_reference: [{ image: { id: initImageId, type: 'GENERATED' }, strength: 'HIGH' }],
-      };
-    }
-
-    const response = await axios.post(
-      'https://cloud.leonardo.ai/api/rest/v2/generations',
-      payload,
-      { headers: this.getHeaders() },
-    );
-    const generationId = response.data?.generate?.generationId;
-    if (!generationId) throw new Error('Leonardo API에서 generationId 획득 실패');
-
-    const completedData = await this.poll(`Generation [${generationId}]`, async () => {
-      const statusRes = await axios.get(
-        `https://cloud.leonardo.ai/api/rest/v1/generations/${generationId}`,
-        { headers: this.getHeaders() },
-      );
-      const gen = statusRes.data?.generations_by_pk;
-      if (gen?.status === 'COMPLETE') return gen;
-      if (gen?.status === 'FAILED') throw new Error('Leonardo Generation failed');
-      return null;
-    });
-
-    const imageUrl = completedData.generated_images[0].url;
-    const imageId  = completedData.generated_images[0].id;
-    const imgRes   = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-    return { buffer: Buffer.from(imgRes.data, 'binary'), imageId };
   }
 }

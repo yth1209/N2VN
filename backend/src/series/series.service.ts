@@ -102,7 +102,18 @@ export class SeriesService {
       order: { episodeNumber: 'ASC' },
     });
 
-    return new SeriesDetailResponseDto(series, episodes);
+    const episodeIds = episodes.map((e) => e.id);
+    const allSteps = episodeIds.length
+      ? await this.repo.pipelineStep.find({ where: { episodeId: In(episodeIds) } })
+      : [];
+
+    const stepsMap = new Map<string, typeof allSteps>();
+    for (const step of allSteps) {
+      if (!stepsMap.has(step.episodeId)) stepsMap.set(step.episodeId, []);
+      stepsMap.get(step.episodeId)!.push(step);
+    }
+
+    return new SeriesDetailResponseDto(series, episodes, stepsMap);
   }
 
   async getSeriesAssets(seriesId: string): Promise<SeriesAssetsResponseDto> {

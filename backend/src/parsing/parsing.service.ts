@@ -1,32 +1,37 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
-import { PromptTemplate } from '@langchain/core/prompts';
-import { StructuredOutputParser } from '@langchain/core/output_parsers';
 import { z } from 'zod';
-import { ConfigService } from '@nestjs/config';
-import { character_prompt, scene_prompt, background_prompt } from './prompt/prompt';
+import { character_prompt, scene_prompt } from './prompt/prompt';
 import { S3HelperService } from '../common/s3-helper.service';
-import { Emotion, StyleKey } from '../common/constants';
+import { GenAIHelperService } from '../common/gen-ai-helper.service';
+import { Emotion, StyleKey, BgmCategory } from '../common/constants';
 import { RepositoryProvider } from '../common/repository.provider';
+import { StepKey, StepStatus } from '../entities/episode-pipeline-step.entity';
 
 @Injectable()
 export class ParsingService {
   private readonly logger = new Logger(ParsingService.name);
-  private readonly model: ChatGoogleGenerativeAI;
 
   constructor(
-    private readonly configService: ConfigService,
     private readonly s3HelperService: S3HelperService,
+    private readonly genAI: GenAIHelperService,
     private readonly repo: RepositoryProvider,
-  ) {
-    this.model = new ChatGoogleGenerativeAI({
-      model: this.configService.get<string>('GEMINI_MODEL') || 'gemini-2.5-flash',
-      temperature: 0.1,
-      apiKey: this.configService.get<string>('GEMINI_API_KEY'),
-    });
-  }
+  ) {}
 
   async parseCharactersForEpisode(seriesId: string, episodeNumber: number): Promise<void> {
+    const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
+    const episodeId = episode?.id;
+    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_CHARACTERS, StepStatus.PROCESSING, { startedAt: new Date() });
+
+    try {
+      await this._parseCharacters(seriesId, episodeNumber);
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_CHARACTERS, StepStatus.DONE, { finishedAt: new Date() });
+    } catch (err: any) {
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_CHARACTERS, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
+      throw err;
+    }
+  }
+
+  private async _parseCharacters(seriesId: string, episodeNumber: number): Promise<void> {
     const series = await this.repo.series.findOne({ where: { id: seriesId } });
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
@@ -34,7 +39,6 @@ export class ParsingService {
       `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
     );
 
-    // 기존 캐릭터 목록 조회 → 프롬프트에 포함 (병합 전략)
     const existing = await this.repo.character.find({ where: { seriesId } });
     const existingStr = existing.length
       ? existing.map((c) => `- ID: ${c.id}, Name: ${c.name}, Sex: ${c.sex}, Look: ${c.look}`).join('\n')
@@ -56,24 +60,20 @@ export class ParsingService {
       ),
     });
 
-    const parser = StructuredOutputParser.fromZodSchema(characterSchema);
-    const promptTemplate = new PromptTemplate({
-      template: character_prompt,
-      inputVariables: ['novel_text', 'existing_characters'],
-      partialVariables: { format_instructions: parser.getFormatInstructions() },
-    });
+    const result = await this.genAI.geminiParse(
+      character_prompt,
+      ['novel_text', 'existing_characters'],
+      characterSchema,
+      { novel_text: novelText, existing_characters: existingStr },
+    );
 
-    const chain = promptTemplate.pipe(this.model).pipe(parser);
-    const result = await chain.invoke({ novel_text: novelText, existing_characters: existingStr });
-
-    // series의 스타일 정보 갱신 (최초 파싱 시에만 — null인 경우)
+    // 시리즈 스타일 최초 1회만 저장
     if (!series.characterArtStyle) {
       series.characterArtStyle = result.globalArtStyle;
       series.characterStyleKey = result.styleKey;
       await this.repo.series.save(series);
     }
 
-    // 신규 캐릭터만 INSERT (기존 캐릭터는 건드리지 않음)
     const newCharacters = Object.entries(result.characters).map(([name, attr]: [string, any]) => {
       return this.repo.character.create({ seriesId, name, sex: attr.sex, look: attr.look });
     });
@@ -84,63 +84,21 @@ export class ParsingService {
     }
   }
 
-  async parseBackgroundsForEpisode(seriesId: string, episodeNumber: number): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
-    if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
+  async parseScenesForEpisode(seriesId: string, episodeNumber: number): Promise<void> {
+    const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
+    const episodeId = episode?.id;
+    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.PROCESSING, { startedAt: new Date() });
 
-    const novelText = await this.s3HelperService.readText(
-      `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
-    );
-
-    // 기존 배경 목록 조회 → 프롬프트에 포함 (병합 전략)
-    const existing = await this.repo.background.find({ where: { seriesId } });
-    const existingStr = existing.length
-      ? existing.map((b) => `- ID: ${b.id}, Name: ${b.name}, Description: ${b.description}`).join('\n')
-      : '(없음)';
-
-    const backgroundSchema = z.object({
-      globalBackgroundArtStyle: z.string().describe(
-        '이 소설의 모든 배경 이미지 생성에 공통으로 적용될 환경/건축물 화풍 및 분위기',
-      ),
-      styleKey: z.nativeEnum(StyleKey).describe(
-        '소설 배경 분위기에 가장 어울리는 렌더링 필터 스타일',
-      ),
-      backgrounds: z.record(
-        z.string().describe('배경의 임의 고유 ID'),
-        z.object({
-          name:        z.string().describe('배경의 실제 이름 또는 짧은 명칭'),
-          description: z.string().describe('배경의 시각적 특징, 분위기, 주변 사물 (영어 줄글, 시간대 제외)'),
-        }),
-      ).describe('소설 내 등장하는 유의미한 주요 배경들의 목록'),
-    });
-
-    const parser = StructuredOutputParser.fromZodSchema(backgroundSchema);
-    const promptTemplate = new PromptTemplate({
-      template: background_prompt,
-      inputVariables: ['novel_text', 'existing_backgrounds'],
-      partialVariables: { format_instructions: parser.getFormatInstructions() },
-    });
-
-    const chain = promptTemplate.pipe(this.model).pipe(parser);
-    const result = await chain.invoke({ novel_text: novelText, existing_backgrounds: existingStr });
-
-    if (!series.backgroundArtStyle) {
-      series.backgroundArtStyle = result.globalBackgroundArtStyle;
-      series.backgroundStyleKey = result.styleKey;
-      await this.repo.series.save(series);
-    }
-
-    const newBackgrounds = Object.entries(result.backgrounds).map(([, attr]: [string, any]) => {
-      return this.repo.background.create({ seriesId, name: attr.name, description: attr.description });
-    });
-
-    if (newBackgrounds.length > 0) {
-      await this.repo.background.save(newBackgrounds);
-      this.logger.log(`[${seriesId}] 신규 배경 ${newBackgrounds.length}개 저장 완료`);
+    try {
+      await this._parseScenes(seriesId, episodeNumber);
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.DONE, { finishedAt: new Date() });
+    } catch (err: any) {
+      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
+      throw err;
     }
   }
 
-  async parseScenesForEpisode(seriesId: string, episodeNumber: number): Promise<void> {
+  private async _parseScenes(seriesId: string, episodeNumber: number): Promise<void> {
     const series = await this.repo.series.findOne({ where: { id: seriesId } });
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
@@ -148,19 +106,55 @@ export class ParsingService {
       `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
     );
 
+    // 기존 배경 목록
+    const dbBackgrounds = await this.repo.background.find({ where: { seriesId } });
+    const existingBgStr = dbBackgrounds.length
+      ? dbBackgrounds.map((b) => `- ID: ${b.id}, Name: ${b.name}, Description: ${b.description}`).join('\n')
+      : '(없음)';
+
+    // 기존 BGM 목록
+    const dbBgms = await this.repo.bgm.find({ where: { seriesId } });
+    const existingBgmStr = dbBgms.length
+      ? dbBgms.map((b) => `- ID: ${b.id}, Category: ${b.category}, Prompt: ${b.prompt}`).join('\n')
+      : '(없음)';
+
+    // 캐릭터 목록
+    const dbCharacters = await this.repo.character.find({ where: { seriesId } });
+    const charactersInfoStr = dbCharacters
+      .map((c) => `- ID: ${c.id}, Name: ${c.name}, Sex: ${c.sex}, Description: ${c.look}`)
+      .join('\n');
+
     const sceneSchema = z.object({
+      globalBackgroundArtStyle: z.string().describe(
+        '이 소설의 모든 배경 이미지 생성에 공통 적용될 화풍·분위기 영어 키워드',
+      ),
+      backgroundStyleKey: z.nativeEnum(StyleKey).describe(
+        '배경 렌더링 필터 스타일',
+      ),
+      newBackgrounds: z.array(z.object({
+        tempId:      z.string().describe('new_bg_{n} 형식의 임시 ID'),
+        name:        z.string().describe('배경 명칭'),
+        description: z.string().describe('시각적 특징·분위기 영문 줄글 (시간대 제외)'),
+      })).describe('기존 배경 목록에 없어 새로 생성해야 하는 배경들'),
+      newBgms: z.array(z.object({
+        tempId:   z.string().describe('new_bgm_{n} 형식의 임시 ID'),
+        category: z.nativeEnum(BgmCategory).describe('BGM 감정 카테고리'),
+        prompt:   z.string().describe('Lyria 3 Clip 생성용 영어 텍스트 프롬프트 (30단어 이내)'),
+      })).describe('기존 BGM 목록에 없어 새로 생성해야 하는 BGM들'),
       scenes: z.array(z.object({
         backgroundId: z.string().describe(
-          '현재 장소에 가장 알맞은 backgrounds_info 내의 배경 ID. 매칭 없으면 bg_unknown',
+          '이 씬의 배경 ID. 기존 배경이면 그대로, 신규면 newBackgrounds 선언 후 동일 tempId 사용',
         ),
-        timeOfDay:    z.string().describe('이 Scene이 일어나는 시간대 (예: Morning, Night, Dusk)'),
-        bgm_prompt:   z.string().describe('Scene 분위기에 맞는 BGM 생성용 짧은 영어 프롬프트'),
+        bgmId: z.string().describe(
+          '이 씬의 BGM ID. 기존 BGM이면 그대로, 신규면 newBgms 선언 후 동일 tempId 사용',
+        ),
+        timeOfDay: z.string().describe('씬이 일어나는 시간대 (예: Morning, Night, Dusk)'),
         dialogues: z.array(z.object({
           characterId: z.string().describe(
             '화자의 고유 ID (characters_info 참고). 나레이션인 경우 narrator',
           ),
           dialog:   z.string().describe('대사 또는 서술 내용 문장 원문 (번역 금지)'),
-          action:   z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe('화자의 행동/동작'),
+          action:   z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe('화자의 행동/동작. 항상 제약 조건에 맞는 단어 사용'),
           emotion:  z.nativeEnum(Emotion).describe(
             `화자의 감정 (반드시 다음 중 한 가지만 선택: ${Object.values(Emotion).join(', ')})`,
           ),
@@ -174,34 +168,59 @@ export class ParsingService {
       })),
     });
 
-    const parser = StructuredOutputParser.fromZodSchema(sceneSchema);
-    const promptTemplate = new PromptTemplate({
-      template: scene_prompt,
-      inputVariables: ['novel_text', 'characters_info', 'backgrounds_info'],
-      partialVariables: { format_instructions: parser.getFormatInstructions() },
-    });
+    const result = await this.genAI.geminiParse(
+      scene_prompt,
+      ['novel_text', 'characters_info', 'existing_backgrounds', 'existing_bgms'],
+      sceneSchema,
+      {
+        novel_text:           novelText,
+        characters_info:      charactersInfoStr,
+        existing_backgrounds: existingBgStr,
+        existing_bgms:        existingBgmStr,
+      },
+    );
 
-    const chain = promptTemplate.pipe(this.model).pipe(parser);
+    // === 1. 신규 배경 DB 적재 + ID 맵 구성 ===
+    const bgTempToRealId = new Map<string, string>();
+    for (const nb of result.newBackgrounds) {
+      const entity = this.repo.background.create({
+        seriesId,
+        name:        nb.name,
+        description: nb.description,
+      });
+      const saved = await this.repo.background.save(entity);
+      bgTempToRealId.set(nb.tempId, saved.id);
+    }
 
-    const dbCharacters = await this.repo.character.find({ where: { seriesId } });
-    const charactersInfoString = dbCharacters
-      .map((c) => `- ID: ${c.id}, Name: ${c.name}, Sex: ${c.sex}, Description: ${c.look}`)
-      .join('\n');
+    // === 2. 신규 BGM DB 적재 + ID 맵 구성 ===
+    const bgmTempToRealId = new Map<string, string>();
+    for (const nb of result.newBgms) {
+      const entity = this.repo.bgm.create({
+        seriesId,
+        category: nb.category,
+        prompt:   nb.prompt,
+      });
+      const saved = await this.repo.bgm.save(entity);
+      bgmTempToRealId.set(nb.tempId, saved.id);
+    }
 
-    const dbBackgrounds = await this.repo.background.find({ where: { seriesId } });
-    const backgroundsInfoString = dbBackgrounds
-      .map((b) => `- ID: ${b.id}, Name: ${b.name}, Description: ${b.description}`)
-      .join('\n');
+    // === 3. 시리즈 배경 스타일 최초 1회만 저장 ===
+    if (!series.backgroundArtStyle) {
+      series.backgroundArtStyle = result.globalBackgroundArtStyle;
+      series.backgroundStyleKey = result.backgroundStyleKey;
+      await this.repo.series.save(series);
+    }
 
-    const result = await chain.invoke({
-      novel_text:       novelText,
-      characters_info:  charactersInfoString,
-      backgrounds_info: backgroundsInfoString,
-    });
+    // === 4. scenes의 임시 ID를 실제 UUID로 치환 ===
+    const resolvedScenes = result.scenes.map((scene) => ({
+      ...scene,
+      backgroundId: bgTempToRealId.get(scene.backgroundId) ?? scene.backgroundId,
+      bgmId:        bgmTempToRealId.get(scene.bgmId)        ?? scene.bgmId,
+    }));
 
-    // 사용된 감정 수집 → character_img 플레이스홀더 생성 (genId=null인 경우에만)
+    // === 5. character_img 플레이스홀더 생성 (genId=null) ===
     const emotionMap = new Map<string, Set<Emotion>>();
-    for (const scene of result.scenes) {
+    for (const scene of resolvedScenes) {
       for (const dialogue of scene.dialogues) {
         const charId = dialogue.characterId;
         if (charId && charId !== 'narrator' && charId !== 'unknown') {
@@ -210,7 +229,6 @@ export class ParsingService {
         }
       }
     }
-
     for (const [charId, emotions] of emotionMap.entries()) {
       for (const emotion of emotions) {
         const exists = await this.repo.characterImg.findOne({ where: { characterId: charId, emotion } });
@@ -222,12 +240,12 @@ export class ParsingService {
       }
     }
 
-    // scenes.json을 S3에 저장
+    // === 6. scenes.json S3 저장 ===
     await this.s3HelperService.uploadJson(
       `series/${seriesId}/episodes/${episodeNumber}/scenes.json`,
-      result,
+      { scenes: resolvedScenes },
     );
 
-    this.logger.log(`[${seriesId}/ep${episodeNumber}] scenes.json 저장 완료`);
+    this.logger.log(`[${seriesId}/ep${episodeNumber}] 씬 파싱 완료 (신규 배경 ${result.newBackgrounds.length}개, 신규 BGM ${result.newBgms.length}개)`);
   }
 }

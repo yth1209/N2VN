@@ -9,6 +9,7 @@ import { EpisodePipelineStep } from './entities/episode-pipeline-step.entity';
 import { Character } from './entities/character.entity';
 import { CharacterImg } from './entities/character-img.entity';
 import { Background } from './entities/background.entity';
+import { Bgm } from './entities/bgm.entity';
 
 import { CommonModule } from './common/common.module';
 import { AuthModule } from './auth/auth.module';
@@ -16,6 +17,7 @@ import { SeriesModule } from './series/series.module';
 import { EpisodeModule } from './episode/episode.module';
 import { ParsingModule } from './parsing/parsing.module';
 import { ImageModule } from './image/image.module';
+import { BgmModule } from './bgm/bgm.module';
 
 @Module({
   imports: [
@@ -29,7 +31,7 @@ import { ImageModule } from './image/image.module';
         username: configService.get<string>('DB_USERNAME', 'root'),
         password: configService.get<string>('DB_PASSWORD', ''),
         database: configService.get<string>('DB_DATABASE', 'n2vn'),
-        entities: [User, Series, Episode, EpisodePipelineStep, Character, CharacterImg, Background],
+        entities: [User, Series, Episode, EpisodePipelineStep, Character, CharacterImg, Background, Bgm],
         // 개발: synchronize: true. 운영 배포 전 false로 전환 후 마이그레이션 실행 필요.
         synchronize: true,
         ssl: { rejectUnauthorized: false },
@@ -43,6 +45,7 @@ import { ImageModule } from './image/image.module';
     EpisodeModule,
     ParsingModule,
     ImageModule,
+    BgmModule,
   ],
 })
 export class AppModule {}

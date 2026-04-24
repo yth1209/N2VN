@@ -7,17 +7,16 @@ let currentDetailTab  = 'episodes';
 
 const STEP_LABELS = {
   parseCharacters:          '캐릭터 분석',
-  parseBackgrounds:         '배경 분석',
-  parseScenes:              '씬 분석',
+  parseScenes:              '씬·배경 분석',
   generateCharacterImages:  '캐릭터 이미지 생성',
   generateBackgroundImages: '배경 이미지 생성',
+  generateBgm:              'BGM 생성',
 };
 
 const STEP_ICONS = { PENDING: '○', PROCESSING: '⟳', DONE: '✓', FAILED: '✕' };
 
 const STEP_ENDPOINTS = {
   parseCharacters:          '/parsing/characters',
-  parseBackgrounds:         '/parsing/backgrounds',
   parseScenes:              '/parsing/scenes',
   generateCharacterImages:  '/images/characters',
   generateBackgroundImages: '/images/backgrounds',
@@ -130,12 +129,12 @@ async function refreshSeriesDetail() {
     currentSeriesData = json.data;
 
     document.getElementById('detail-title').textContent = currentSeriesData.title;
-    renderDetailEpisodeList(currentSeriesData.episodes);
+    renderDetailEpisodeList(currentSeriesData.id, currentSeriesData.episodes);
     updateAddEpisodeBtn(currentSeriesData.episodes);
   } catch {}
 }
 
-function renderDetailEpisodeList(episodes) {
+function renderDetailEpisodeList(seriesId, episodes) {
   const ul = document.getElementById('detail-ep-list');
   if (!episodes || episodes.length === 0) {
     ul.innerHTML = '<li class="empty-msg">등록된 회차가 없습니다.</li>';
@@ -146,7 +145,7 @@ function renderDetailEpisodeList(episodes) {
     const isFailed     = ep.status === 'FAILED';
     const isDone       = ep.status === 'DONE';
 
-    const stepsHtml = (isProcessing || isFailed) ? renderPipelineSteps(ep) : '';
+    const stepsHtml = (isProcessing || isFailed) ? renderPipelineSteps(seriesId, ep) : '';
 
     return `
       <li class="episode-item manage-ep ${isProcessing ? 'processing' : ''} ${isFailed ? 'failed' : ''}">
@@ -168,7 +167,7 @@ function renderDetailEpisodeList(episodes) {
   }).join('');
 }
 
-function renderPipelineSteps(episode) {
+function renderPipelineSteps(seriesId, episode) {
   const steps = episode.pipelineSteps || [];
   const stepsMap = {};
   for (const s of steps) stepsMap[s.stepKey] = s;
@@ -178,11 +177,12 @@ function renderPipelineSteps(episode) {
     const status = step?.status ?? 'PENDING';
     const icon   = STEP_ICONS[status] ?? '○';
     const failed = status === 'FAILED';
+    console.log(`retryStep('${seriesId}', ${episode.episodeNumber}, '${key}')`);
     return `
       <li class="pipeline-step ${status.toLowerCase()}">
         <span class="step-icon">${icon}</span>
         <span class="step-label">${label}</span>
-        ${failed ? `<button class="btn-retry" onclick="retryStep('${episode.seriesId}', ${episode.episodeNumber}, '${key}')">재실행</button>` : ''}
+        ${failed ? `<button class="btn-retry" onclick="retryStep('${seriesId}', ${episode.episodeNumber}, '${key}')">재실행</button>` : ''}
       </li>
     `;
   }).join('');
@@ -322,6 +322,7 @@ async function retryStep(sId, episodeNumber, stepKey) {
   const url = STEP_ENDPOINTS[stepKey];
   if (!url) return;
   try {
+    console.log(`Real retryStep('${sId}', ${episodeNumber}, '${stepKey}')`);
     await Auth.authFetch(url, {
       method: 'POST',
       body:   JSON.stringify({ seriesId: sId, episodeNumber }),

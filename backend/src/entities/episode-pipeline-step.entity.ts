@@ -3,18 +3,18 @@ import { Episode } from './episode.entity';
 
 export enum StepKey {
   PARSE_CHARACTERS           = 'parseCharacters',
-  PARSE_BACKGROUNDS          = 'parseBackgrounds',
-  PARSE_SCENES               = 'parseScenes',
+  PARSE_SCENES               = 'parseScenes',             // 배경·BGM DB 적재 포함
   GENERATE_CHARACTER_IMAGES  = 'generateCharacterImages',
   GENERATE_BACKGROUND_IMAGES = 'generateBackgroundImages',
+  GENERATE_BGM               = 'generateBgm',
 }
 
 export const STEP_ORDER: StepKey[] = [
   StepKey.PARSE_CHARACTERS,
-  StepKey.PARSE_BACKGROUNDS,
   StepKey.PARSE_SCENES,
   StepKey.GENERATE_CHARACTER_IMAGES,
   StepKey.GENERATE_BACKGROUND_IMAGES,
+  StepKey.GENERATE_BGM,
 ];
 
 export enum StepStatus {
