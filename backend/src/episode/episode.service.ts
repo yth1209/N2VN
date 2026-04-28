@@ -80,7 +80,7 @@ export class EpisodeService {
     );
 
     // 7. 파이프라인 fire-and-forget
-    this.pipelineService.run(seriesId, episodeNumber).catch(() => {});
+    this.pipelineService.run(episode.id).catch(() => {});
 
     const pipelineSteps = await this.repo.pipelineStep.find({ where: { episodeId: episode.id } });
     return new EpisodeResponseDto(episode, pipelineSteps);
@@ -111,11 +111,11 @@ export class EpisodeService {
     await this.repo.episode.remove(episode);
   }
 
-  async getVnScript(seriesId: string, episodeNumber: number) {
+  async getVnScript(seriesId: string, episodeId: string) {
     const series = await this.repo.series.findOne({ where: { id: seriesId } });
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
-    const episode = await this.repo.episode.findOne({ where: { seriesId, episodeNumber } });
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
     if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
     if (episode.status !== EpisodeStatus.DONE) {
       throw new HttpException('에피소드 처리가 완료되지 않았습니다.', HttpStatus.BAD_REQUEST);
@@ -125,7 +125,7 @@ export class EpisodeService {
 
     // S3에서 scenes.json 읽기
     const scenesData = await this.s3Helper.readJson(
-      `series/${seriesId}/episodes/${episodeNumber}/scenes.json`,
+      `series/${seriesId}/episodes/${episodeId}/scenes.json`,
     );
 
     // 캐릭터, 배경 조회 (N+1 방지)

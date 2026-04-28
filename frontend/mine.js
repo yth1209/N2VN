@@ -20,6 +20,7 @@ const STEP_ENDPOINTS = {
   parseScenes:              '/parsing/scenes',
   generateCharacterImages:  '/images/characters',
   generateBackgroundImages: '/images/backgrounds',
+  generateBgm:              '/sound/bgm',
 };
 
 // ── Init ──────────────────────────────────────────────
@@ -177,12 +178,12 @@ function renderPipelineSteps(seriesId, episode) {
     const status = step?.status ?? 'PENDING';
     const icon   = STEP_ICONS[status] ?? '○';
     const failed = status === 'FAILED';
-    console.log(`retryStep('${seriesId}', ${episode.episodeNumber}, '${key}')`);
+    console.log(`retryStep('${seriesId}', '${episode.episodeNumber}', '${key}')`);
     return `
       <li class="pipeline-step ${status.toLowerCase()}">
         <span class="step-icon">${icon}</span>
         <span class="step-label">${label}</span>
-        ${failed ? `<button class="btn-retry" onclick="retryStep('${seriesId}', ${episode.episodeNumber}, '${key}')">재실행</button>` : ''}
+        ${failed ? `<button class="btn-retry" onclick="retryStep('${seriesId}', '${episode.id}', '${key}')">재실행</button>` : ''}
       </li>
     `;
   }).join('');
@@ -318,14 +319,14 @@ async function deleteEpisode(episodeNumber) {
 }
 
 // ── Retry Step ────────────────────────────────────────
-async function retryStep(sId, episodeNumber, stepKey) {
+async function retryStep(sId, episodeId, stepKey) {
   const url = STEP_ENDPOINTS[stepKey];
   if (!url) return;
   try {
-    console.log(`Real retryStep('${sId}', ${episodeNumber}, '${stepKey}')`);
+    console.log(`Real retryStep('${episodeId}', '${stepKey}')`);
     await Auth.authFetch(url, {
       method: 'POST',
-      body:   JSON.stringify({ seriesId: sId, episodeNumber }),
+      body:   JSON.stringify({ episodeId }),
     });
     startPolling(sId);
   } catch { alert('재실행 요청 실패'); }
@@ -336,11 +337,11 @@ function startPolling(seriesId) {
   if (pollingTimer) clearInterval(pollingTimer);
   pollingTimer = setInterval(async () => {
     try {
-      const res  = await fetch(`${BASE_URL}/series/${seriesId}`);
+      const res  = await fetch(`${BASE_URL}/series/${seriesId}`, { cache: 'no-store' });
       const json = await res.json();
       if (!json.success) return;
       currentSeriesData = json.data;
-      renderDetailEpisodeList(currentSeriesData.episodes);
+      renderDetailEpisodeList(currentSeriesData.id, currentSeriesData.episodes);
       updateAddEpisodeBtn(currentSeriesData.episodes);
 
       const stillProcessing = currentSeriesData.episodes.some((e) => e.status === 'PROCESSING');
@@ -354,7 +355,7 @@ function startPolling(seriesId) {
           await loadAssetsGallery();
         }
       }
-    } catch {}
+    } catch (e) { console.error('[Polling] 오류:', e); }
   }, 3000);
 }
 

@@ -1,6 +1,6 @@
-﻿const seriesId = new URLSearchParams(location.search).get('id');
+const seriesId = new URLSearchParams(location.search).get('id');
 
-let currentEpisodeNumber = null;
+let currentEpisodeId = null;
 let seriesData = null;
 
 // ── Init ──────────────────────────────────────────────
@@ -52,7 +52,7 @@ function renderEpisodeList(episodes) {
     const clickable = isDone;
     return `
       <li class="episode-item ${isRead ? 'read' : ''} ${isProcessing ? 'processing' : ''} ${isFailed ? 'failed' : ''}"
-          onclick="${clickable ? `openVnPlayer(${ep.episodeNumber})` : ''}">
+          onclick="${clickable ? `openVnPlayer('${ep.id}')` : ''}">
         <div class="ep-left">
           <span class="ep-num">${ep.episodeNumber}화</span>
           <span class="ep-title">${escapeHtml(ep.title)}</span>
@@ -69,8 +69,8 @@ function renderEpisodeList(episodes) {
 }
 
 // ── VN Player Modal ───────────────────────────────────
-function openVnPlayer(episodeNumber) {
-  currentEpisodeNumber = episodeNumber;
+function openVnPlayer(episodeId) {
+  currentEpisodeId = episodeId;
   const modal = document.getElementById('vn-modal');
   modal.classList.remove('hidden');
   document.body.style.overflow = 'hidden';
@@ -78,7 +78,7 @@ function openVnPlayer(episodeNumber) {
   const iframe = document.getElementById('vn-iframe');
   iframe.src = 'player.html';
   iframe.onload = () => {
-    iframe.contentWindow.postMessage({ seriesId, episodeNumber }, window.location.origin);
+    iframe.contentWindow.postMessage({ seriesId, episodeId }, window.location.origin);
     iframe.onload = null;
   };
 }
@@ -86,11 +86,11 @@ function openVnPlayer(episodeNumber) {
 function closeVnPlayer() {
   document.getElementById('vn-modal').classList.add('hidden');
   document.body.style.overflow = '';
-  if (currentEpisodeNumber !== null) {
-    markEpisodeAsRead(seriesId, currentEpisodeNumber);
+  if (currentEpisodeId !== null) {
+    markEpisodeAsRead(seriesId, currentEpisodeId);
     renderEpisodeList(seriesData?.episodes ?? []);
   }
-  currentEpisodeNumber = null;
+  currentEpisodeId = null;
 }
 
 // ESC 키로 플레이어 닫기

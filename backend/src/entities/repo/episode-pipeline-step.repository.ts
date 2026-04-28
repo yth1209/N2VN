@@ -1,6 +1,6 @@
 import { DataSource, Repository } from 'typeorm';
 import { Injectable } from '@nestjs/common';
-import { EpisodePipelineStep, StepKey, StepStatus } from './episode-pipeline-step.entity';
+import { EpisodePipelineStep, StepKey, StepStatus } from '../episode-pipeline-step.entity';
 
 @Injectable()
 export class EpisodePipelineStepRepository extends Repository<EpisodePipelineStep> {

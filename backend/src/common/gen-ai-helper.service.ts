@@ -71,11 +71,11 @@ export class GenAIHelperService {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
         responseModalities: ['AUDIO'],
-        speechConfig: { audioEncoding: 'MP3' } as any,
       } as any,
     });
 
-    const inlineData = result.response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    const parts = result.response.candidates?.[0]?.content?.parts ?? [];
+    const inlineData = parts.find((p: any) => p.inlineData)?.inlineData;
     if (!inlineData?.data) throw new Error('Lyria: audio data 없음');
 
     return Buffer.from(inlineData.data, 'base64');

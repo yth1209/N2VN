@@ -6,7 +6,8 @@ import { Emotion, STYLE_UUIDS } from '../common/constants';
 import { RepositoryProvider } from '../common/repository.provider';
 import { CharacterImg } from '../entities/character-img.entity';
 import { getCharacterPrompt } from './prompt/prompt';
-import { StepKey, StepStatus } from '../entities/episode-pipeline-step.entity';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { PipelineEvent, PipelineStepPayload } from 'src/pipeline/pipeline.events';
 
 @Injectable()
 export class ImageService {
@@ -16,78 +17,64 @@ export class ImageService {
     private readonly s3HelperService: S3HelperService,
     private readonly genAI: GenAIHelperService,
     private readonly repo: RepositoryProvider,
-  ) {}
+    private readonly eventEmitter: EventEmitter2,
+  ) { }
 
 
-  async generateCharacterImages(seriesId: string, episodeNumber?: number): Promise<void> {
-    const episode = episodeNumber != null ? await this.repo.episode.findOneBy({ seriesId, episodeNumber }) : null;
-    const episodeId = episode?.id;
-    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_CHARACTER_IMAGES, StepStatus.PROCESSING, { startedAt: new Date() });
-
-    try {
-      await this._generateCharacterImages(seriesId);
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_CHARACTER_IMAGES, StepStatus.DONE, { finishedAt: new Date() });
-    } catch (err: any) {
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_CHARACTER_IMAGES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
-      throw err;
-    }
+  async eventGenCharacterImages(episodeId: string): Promise<void> {
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
+    if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
+    this.eventEmitter.emit(PipelineEvent.CHAR_IMG_START, { episodeId } satisfies PipelineStepPayload);
   }
 
-  private async _generateCharacterImages(seriesId: string): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
+  async generateCharacterImages(episodeId: string): Promise<void> {
+    const series = await this.repo.series.findByEpisodeId(episodeId);
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
     const pendingImages = await this.repo.characterImg
       .createQueryBuilder('ci')
       .innerJoinAndSelect('ci._characterFk', 'c')
-      .where('c.seriesId = :seriesId', { seriesId })
+      .where('c.seriesId = :seriesId', { seriesId: series.id })
       .andWhere('ci.genId IS NULL')
       .getMany();
 
     if (pendingImages.length === 0) {
-      this.logger.log(`[${seriesId}] 생성 대기 중인 캐릭터 이미지 없음`);
+      this.logger.log(`[${series.id}] 생성 대기 중인 캐릭터 이미지 없음`);
       return;
     }
 
-    const charGroups        = Map.groupBy(pendingImages, (pi) => pi.characterId);
-    const globalArtStyle    = series.characterArtStyle || '';
-    const actualStyleKey    = series.characterStyleKey || 'DYNAMIC';
+    const charGroups = Map.groupBy(pendingImages, (pi) => pi.characterId);
+    const globalArtStyle = series.characterArtStyle || '';
+    const actualStyleKey = series.characterStyleKey || 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
 
     this.logger.log(
-      `[${seriesId}] 캐릭터 이미지 생성 시작: ${charGroups.size}명, 총 ${pendingImages.length}개 감정`,
+      `[${series.id}] 캐릭터 이미지 생성 시작: ${charGroups.size}명, 총 ${pendingImages.length}개 감정`,
     );
 
     const characterPromises = Array.from(charGroups.values()).map((pis) =>
-      this.processCharacter(seriesId, pis, globalArtStyle, selectedStyleUUID).catch((err) =>
+      this.processCharacter(series.id, pis, globalArtStyle, selectedStyleUUID).catch((err) =>
         this.logger.error(`[${pis[0].characterId}] 처리 실패: ${err.message}`),
       ),
     );
 
     await Promise.all(characterPromises);
-    this.logger.log(`[${seriesId}] 모든 캐릭터 이미지 생성 완료`);
+    this.logger.log(`[${series.id}] 모든 캐릭터 이미지 생성 완료`);
   }
 
   /**
    * seriesId의 미생성 배경(genId = null)만 처리. EpisodePipelineService 및 retry에서 호출.
    */
-  async generateBackgroundImagesForSeries(seriesId: string, episodeNumber?: number): Promise<void> {
-    const episode = episodeNumber != null ? await this.repo.episode.findOneBy({ seriesId, episodeNumber }) : null;
-    const episodeId = episode?.id;
-    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_BACKGROUND_IMAGES, StepStatus.PROCESSING, { startedAt: new Date() });
-
-    try {
-      await this._generateBackgroundImagesForSeries(seriesId);
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_BACKGROUND_IMAGES, StepStatus.DONE, { finishedAt: new Date() });
-    } catch (err: any) {
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.GENERATE_BACKGROUND_IMAGES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
-      throw err;
-    }
+  async eventGenBackgroundImages(episodeId: string): Promise<void> {
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
+    if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
+    this.eventEmitter.emit(PipelineEvent.BG_IMG_START, {episodeId} satisfies PipelineStepPayload);
   }
 
-  private async _generateBackgroundImagesForSeries(seriesId: string): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
+  async generateBackgroundImages(episodeId: string): Promise<void> {
+    const series = await this.repo.series.findByEpisodeId(episodeId);
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
+    const seriesId = series.id;
 
     const backgrounds = await this.repo.background.find({ where: { seriesId, genId: IsNull() } });
     if (!backgrounds.length) {
@@ -95,8 +82,8 @@ export class ImageService {
       return;
     }
 
-    const globalBgArtStyle  = series.backgroundArtStyle ?? '';
-    const actualStyleKey    = series.backgroundStyleKey  ?? 'DYNAMIC';
+    const globalBgArtStyle = series.backgroundArtStyle ?? '';
+    const actualStyleKey = series.backgroundStyleKey ?? 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] ?? STYLE_UUIDS['DYNAMIC'];
 
     this.logger.log(`[${seriesId}] 신규 배경 이미지 생성: ${backgrounds.length}개`);
@@ -123,47 +110,6 @@ export class ImageService {
     this.logger.log(`[${seriesId}] 배경 이미지 생성 완료`);
   }
 
-  /**
-   * 전체 배경 수동 재생성용 (genId 있는 것도 포함). 파이프라인 외부에서 사용.
-   */
-  async generateBackgroundImages(seriesId: string): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
-    if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
-
-    const backgrounds = await this.repo.background.find({ where: { seriesId } });
-    if (!backgrounds || backgrounds.length === 0) {
-      this.logger.log(`[${seriesId}] 배경 없음`);
-      return;
-    }
-
-    const globalBgArtStyle  = series.backgroundArtStyle || '';
-    const actualStyleKey    = series.backgroundStyleKey || 'DYNAMIC';
-    const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
-
-    this.logger.log(`[${seriesId}] 배경 이미지 전체 재생성: ${backgrounds.length}개`);
-
-    const bgPromises = backgrounds.map(async (bg) => {
-      if (bg.genId) return;
-      try {
-        const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
-        const { buffer, imageId } = await this.genAI.leonardoGenerateImage(
-          prompt, undefined, selectedStyleUUID, 1280, 720,
-        );
-        await this.s3HelperService.uploadImage(
-          `series/${seriesId}/backgrounds/${bg.id}.png`, buffer, 'image/png',
-        );
-        bg.genId = imageId;
-        await this.repo.background.save(bg);
-        this.logger.log(`[${bg.id}] 배경 이미지 생성 완료`);
-      } catch (err: any) {
-        this.logger.error(`[${bg.id}] 배경 생성 실패: ${err.message}`);
-      }
-    });
-
-    await Promise.all(bgPromises);
-    this.logger.log(`[${seriesId}] 모든 배경 이미지 생성 완료`);
-  }
-
   private async processCharacter(
     seriesId: string,
     pendingCharImgs: CharacterImg[],
@@ -173,7 +119,7 @@ export class ImageService {
     let defaultImg = pendingCharImgs.find((pci) => pci.emotion === Emotion.DEFAULT);
     if (!defaultImg) throw new HttpException('DEFAULT image entry not found', HttpStatus.BAD_REQUEST);
 
-    const charId   = defaultImg.characterId;
+    const charId = defaultImg.characterId;
     const charInfo = defaultImg._characterFk;
 
     if (!defaultImg.genId) {

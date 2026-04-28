@@ -37,17 +37,17 @@ const endScreen   = document.getElementById('end-screen');
 
 // ── Entry ──────────────────────────────────────────
 window.addEventListener('message', async (event) => {
-  const { seriesId, episodeNumber } = event.data ?? {};
-  if (!seriesId || !episodeNumber) return;
-  await loadScript(seriesId, episodeNumber);
+  const { seriesId, episodeId } = event.data ?? {};
+  if (!seriesId || !episodeId) return;
+  await loadScript(seriesId, episodeId);
 });
 
-async function loadScript(seriesId, episodeNumber) {
+async function loadScript(seriesId, episodeId) {
   loadingEl.classList.remove('hidden');
-  loadingTextEl.textContent = `${episodeNumber}화 데이터를 불러오는 중...`;
+  loadingTextEl.textContent = `${episodeId}화 데이터를 불러오는 중...`;
 
   try {
-    const res    = await fetch(`${BASE_URL}/series/${seriesId}/episodes/${episodeNumber}/vn-script`);
+    const res    = await fetch(`${BASE_URL}/series/${seriesId}/episodes/${episodeId}/vn-script`);
     const result = await res.json();
 
     if (!result.success) {

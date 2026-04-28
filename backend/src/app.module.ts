@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 
 import { User } from './entities/user.entity';
 import { Series } from './entities/series.entity';
@@ -17,7 +18,7 @@ import { SeriesModule } from './series/series.module';
 import { EpisodeModule } from './episode/episode.module';
 import { ParsingModule } from './parsing/parsing.module';
 import { ImageModule } from './image/image.module';
-import { BgmModule } from './bgm/bgm.module';
+import { SoundModule } from './sound/sound.module';
 
 @Module({
   imports: [
@@ -26,8 +27,8 @@ import { BgmModule } from './bgm/bgm.module';
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
         type: 'mariadb',
-        host:     configService.get<string>('DB_HOST', '127.0.0.1'),
-        port:     parseInt(configService.get<string>('DB_PORT', '3306')),
+        host: configService.get<string>('DB_HOST', '127.0.0.1'),
+        port: parseInt(configService.get<string>('DB_PORT', '3306')),
         username: configService.get<string>('DB_USERNAME', 'root'),
         password: configService.get<string>('DB_PASSWORD', ''),
         database: configService.get<string>('DB_DATABASE', 'n2vn'),
@@ -39,13 +40,14 @@ import { BgmModule } from './bgm/bgm.module';
       }),
       inject: [ConfigService],
     }),
+    EventEmitterModule.forRoot({ wildcard: false }),
     CommonModule,
     AuthModule,
     SeriesModule,
     EpisodeModule,
     ParsingModule,
     ImageModule,
-    BgmModule,
+    SoundModule,
   ],
 })
-export class AppModule {}
+export class AppModule { }

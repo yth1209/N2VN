@@ -5,7 +5,8 @@ import { S3HelperService } from '../common/s3-helper.service';
 import { GenAIHelperService } from '../common/gen-ai-helper.service';
 import { Emotion, StyleKey, BgmCategory } from '../common/constants';
 import { RepositoryProvider } from '../common/repository.provider';
-import { StepKey, StepStatus } from '../entities/episode-pipeline-step.entity';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { PipelineEvent, PipelineStepPayload } from '../pipeline/pipeline.events';
 
 @Injectable()
 export class ParsingService {
@@ -15,31 +16,26 @@ export class ParsingService {
     private readonly s3HelperService: S3HelperService,
     private readonly genAI: GenAIHelperService,
     private readonly repo: RepositoryProvider,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async parseCharactersForEpisode(seriesId: string, episodeNumber: number): Promise<void> {
-    const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
-    const episodeId = episode?.id;
-    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_CHARACTERS, StepStatus.PROCESSING, { startedAt: new Date() });
-
-    try {
-      await this._parseCharacters(seriesId, episodeNumber);
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_CHARACTERS, StepStatus.DONE, { finishedAt: new Date() });
-    } catch (err: any) {
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_CHARACTERS, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
-      throw err;
-    }
+  async eventParseCharacters(episodeId: string): Promise<void> {
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
+    if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
+    this.eventEmitter.emit(PipelineEvent.CHARACTERS_START, {
+      episodeId
+    } satisfies PipelineStepPayload);
   }
 
-  private async _parseCharacters(seriesId: string, episodeNumber: number): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
+  async parseCharacters(episodeId: string): Promise<void> {
+    const series = await this.repo.series.findByEpisodeId(episodeId);
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
     const novelText = await this.s3HelperService.readText(
-      `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
+      `series/${series.id}/episodes/${episodeId}/novel.txt`,
     );
 
-    const existing = await this.repo.character.find({ where: { seriesId } });
+    const existing = await this.repo.character.find({ where: { seriesId: series.id } });
     const existingStr = existing.length
       ? existing.map((c) => `- ID: ${c.id}, Name: ${c.name}, Sex: ${c.sex}, Look: ${c.look}`).join('\n')
       : '(없음)';
@@ -75,51 +71,45 @@ export class ParsingService {
     }
 
     const newCharacters = Object.entries(result.characters).map(([name, attr]: [string, any]) => {
-      return this.repo.character.create({ seriesId, name, sex: attr.sex, look: attr.look });
+      return this.repo.character.create({ seriesId: series.id, name, sex: attr.sex, look: attr.look });
     });
 
     if (newCharacters.length > 0) {
       await this.repo.character.save(newCharacters);
-      this.logger.log(`[${seriesId}] 신규 캐릭터 ${newCharacters.length}명 저장 완료`);
+      this.logger.log(`[${series.id}] 신규 캐릭터 ${newCharacters.length}명 저장 완료`);
     }
   }
 
-  async parseScenesForEpisode(seriesId: string, episodeNumber: number): Promise<void> {
-    const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
-    const episodeId = episode?.id;
-    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.PROCESSING, { startedAt: new Date() });
-
-    try {
-      await this._parseScenes(seriesId, episodeNumber);
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.DONE, { finishedAt: new Date() });
-    } catch (err: any) {
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
-      throw err;
-    }
+  async eventParseScenes(episodeId: string): Promise<void> {
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
+    if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
+    this.eventEmitter.emit(PipelineEvent.SCENES_START, {
+      episodeId
+    } satisfies PipelineStepPayload);
   }
 
-  private async _parseScenes(seriesId: string, episodeNumber: number): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
+  async parseScenes(episodeId: string): Promise<void> {
+    const series = await this.repo.series.findByEpisodeId(episodeId);
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
     const novelText = await this.s3HelperService.readText(
-      `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
+      `series/${series.id}/episodes/${episodeId}/novel.txt`,
     );
 
     // 기존 배경 목록
-    const dbBackgrounds = await this.repo.background.find({ where: { seriesId } });
+    const dbBackgrounds = await this.repo.background.find({ where: { seriesId: series.id } });
     const existingBgStr = dbBackgrounds.length
       ? dbBackgrounds.map((b) => `- ID: ${b.id}, Name: ${b.name}, Description: ${b.description}`).join('\n')
       : '(없음)';
 
     // 기존 BGM 목록
-    const dbBgms = await this.repo.bgm.find({ where: { seriesId } });
+    const dbBgms = await this.repo.bgm.find({ where: { seriesId: series.id } });
     const existingBgmStr = dbBgms.length
       ? dbBgms.map((b) => `- ID: ${b.id}, Category: ${b.category}, Prompt: ${b.prompt}`).join('\n')
       : '(없음)';
 
     // 캐릭터 목록
-    const dbCharacters = await this.repo.character.find({ where: { seriesId } });
+    const dbCharacters = await this.repo.character.find({ where: { seriesId: series.id } });
     const charactersInfoStr = dbCharacters
       .map((c) => `- ID: ${c.id}, Name: ${c.name}, Sex: ${c.sex}, Description: ${c.look}`)
       .join('\n');
@@ -184,7 +174,7 @@ export class ParsingService {
     const bgTempToRealId = new Map<string, string>();
     for (const nb of result.newBackgrounds) {
       const entity = this.repo.background.create({
-        seriesId,
+        seriesId: series.id,
         name:        nb.name,
         description: nb.description,
       });
@@ -196,7 +186,7 @@ export class ParsingService {
     const bgmTempToRealId = new Map<string, string>();
     for (const nb of result.newBgms) {
       const entity = this.repo.bgm.create({
-        seriesId,
+        seriesId: series.id,
         category: nb.category,
         prompt:   nb.prompt,
       });
@@ -242,10 +232,10 @@ export class ParsingService {
 
     // === 6. scenes.json S3 저장 ===
     await this.s3HelperService.uploadJson(
-      `series/${seriesId}/episodes/${episodeNumber}/scenes.json`,
+      `series/${series.id}/episodes/${episodeId}/scenes.json`,
       { scenes: resolvedScenes },
     );
 
-    this.logger.log(`[${seriesId}/ep${episodeNumber}] 씬 파싱 완료 (신규 배경 ${result.newBackgrounds.length}개, 신규 BGM ${result.newBgms.length}개)`);
+    this.logger.log(`[${series.id}/ep${episodeId}] 씬 파싱 완료 (신규 배경 ${result.newBackgrounds.length}개, 신규 BGM ${result.newBgms.length}개)`);
   }
 }

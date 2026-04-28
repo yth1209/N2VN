@@ -47,7 +47,8 @@ Then reference them by tempId in the scenes array.
 - Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field. Do NOT translate.
 - characterId: match the speaker to their ID using characters_info. Use "narrator" for narration, "unknown" for unidentified characters.
 - For narrator blocks: EXCLUDE purely visual descriptions or emotional expositions. ONLY keep essential plot advancements. Summarize and compress. Avoid consecutive narrator blocks.
-- Provide "action", "emotion", "look" ONLY in English.
+- Provide "emotion", "look" ONLY in English.
+- The "action" field MUST ONLY be one of: ["IDLE", "ATTACK", "SHAKE"].
 - isEntry: true on the FIRST line of a character within a scene. narrator always false.
 - isExit: true on the LAST line of a character within a scene. narrator always false.
 - A character appearing only once in a scene has both isEntry and isExit as true.
