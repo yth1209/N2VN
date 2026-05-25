@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { StructuredOutputParser } from '@langchain/core/output_parsers';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import { ZodSchema } from 'zod';
 import axios from 'axios';
 
@@ -11,7 +11,7 @@ import axios from 'axios';
 export class GenAIHelperService {
   private readonly logger      = new Logger(GenAIHelperService.name);
   private readonly geminiModel: ChatGoogleGenerativeAI;
-  private readonly lyriaAI:    GoogleGenerativeAI;
+  private readonly lyriaAI:    GoogleGenAI;
   private readonly lyriaModel: string;
   private readonly leonardoKey: string;
 
@@ -24,7 +24,7 @@ export class GenAIHelperService {
       apiKey:      geminiApiKey,
     });
 
-    this.lyriaAI    = new GoogleGenerativeAI(geminiApiKey);
+    this.lyriaAI    = new GoogleGenAI({ apiKey: geminiApiKey, httpOptions: { apiVersion: 'v1beta' } });
     this.lyriaModel = this.configService.get<string>('LYRIA_MODEL') ?? 'lyria-3-clip-preview';
 
     this.leonardoKey =
@@ -62,19 +62,13 @@ export class GenAIHelperService {
    * BgmService에서 S3 업로드 전 단계로 호출.
    */
   async lyriaGenerateClip(prompt: string): Promise<Buffer> {
-    const model = this.lyriaAI.getGenerativeModel(
-      { model: this.lyriaModel },
-      { apiVersion: 'v1beta' },
-    );
-
-    const result = await model.generateContent({
+    const result = await this.lyriaAI.models.generateContent({
+      model:    this.lyriaModel,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-      } as any,
+      config:   { responseModalities: ['AUDIO'] } as any,
     });
 
-    const parts = result.response.candidates?.[0]?.content?.parts ?? [];
+    const parts = result.candidates?.[0]?.content?.parts ?? [];
     const inlineData = parts.find((p: any) => p.inlineData)?.inlineData;
     if (!inlineData?.data) throw new Error('Lyria: audio data 없음');
 
