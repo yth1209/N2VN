@@ -10,10 +10,12 @@ import axios from 'axios';
 @Injectable()
 export class GenAIHelperService {
   private readonly logger      = new Logger(GenAIHelperService.name);
-  private readonly geminiModel: ChatGoogleGenerativeAI;
-  private readonly lyriaAI:    GoogleGenAI;
-  private readonly lyriaModel: string;
-  private readonly leonardoKey: string;
+  private readonly geminiModel:      ChatGoogleGenerativeAI;
+  private readonly lyriaAI:          GoogleGenAI;
+  private readonly lyriaModel:       string;
+  private readonly geminiImageAI:    GoogleGenAI;
+  private readonly geminiImageModel: string;
+  private readonly leonardoKey:      string;
 
   constructor(private readonly configService: ConfigService) {
     const geminiApiKey = this.configService.get<string>('GEMINI_API_KEY') ?? '';
@@ -24,8 +26,11 @@ export class GenAIHelperService {
       apiKey:      geminiApiKey,
     });
 
-    this.lyriaAI    = new GoogleGenAI({ apiKey: geminiApiKey, httpOptions: { apiVersion: 'v1beta' } });
+    this.lyriaAI    = new GoogleGenAI({ apiKey: geminiApiKey });
     this.lyriaModel = this.configService.get<string>('LYRIA_MODEL') ?? 'lyria-3-clip-preview';
+
+    this.geminiImageAI    = new GoogleGenAI({ apiKey: geminiApiKey });
+    this.geminiImageModel = this.configService.get<string>('GEMINI_IMAGE_MODEL') ?? 'gemini-3-pro-image-preview';
 
     this.leonardoKey =
       this.configService.get<string>('LEONARDO_AI_API_KEY') ||
@@ -73,6 +78,49 @@ export class GenAIHelperService {
     if (!inlineData?.data) throw new Error('Lyria: audio data 없음');
 
     return Buffer.from(inlineData.data, 'base64');
+  }
+
+  // ── Gemini Image ────────────────────────────────────────────────────────────
+
+  /**
+   * Gemini 이미지 생성.
+   * initImageBuffer가 있으면 image-to-image (감정 이미지), 없으면 text-to-image.
+   * aspectRatio / imageSize로 출력 크기 제어.
+   */
+  async geminiGenerateImage(
+    prompt:           string,
+    initImageBuffer?: Buffer,
+    aspectRatio:      string = '1:1',
+    imageSize:        string = '1K',
+  ): Promise<{ buffer: Buffer }> {
+    const parts: any[] = [{ text: prompt }];
+
+    if (initImageBuffer) {
+      parts.push({
+        inlineData: {
+          mimeType: 'image/png',
+          data:     initImageBuffer.toString('base64'),
+        },
+      });
+    }
+
+    const response = await this.geminiImageAI.models.generateContent({
+      model:    this.geminiImageModel,
+      contents: parts,
+      config:   {
+        responseModalities: ['IMAGE', 'TEXT'],
+        responseFormat: {
+          image: { aspectRatio, imageSize },
+        },
+      } as any,
+    });
+
+    const inlineData = response.candidates?.[0]?.content?.parts
+      ?.find((p: any) => p.inlineData)?.inlineData;
+
+    if (!inlineData?.data) throw new Error('Gemini: image data 없음');
+
+    return { buffer: Buffer.from(inlineData.data, 'base64') };
   }
 
   // ── Leonardo AI ─────────────────────────────────────────────────────────────

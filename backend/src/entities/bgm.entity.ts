@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn } from 'typeorm';
 import { Series } from './series.entity';
 import { BgmCategory } from '../common/constants';
+import { GenStatus } from './common/common.enum';
 
 @Entity('bgm')
 export class Bgm {
@@ -22,5 +23,7 @@ export class Bgm {
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   genId: string | null;
-  // S3 경로는 코드에서 조합: series/{seriesId}/bgm/{id}.mp3
+
+  @Column({ type: 'enum', enum: GenStatus, nullable: true })
+  status: GenStatus;
 }

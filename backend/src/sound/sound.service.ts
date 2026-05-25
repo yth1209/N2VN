@@ -1,10 +1,11 @@
 import { HttpStatus, HttpException, Injectable, Logger } from '@nestjs/common';
-import { IsNull } from 'typeorm';
+import { In } from 'typeorm';
 import { RepositoryProvider } from '../common/repository.provider';
 import { S3HelperService } from '../common/s3-helper.service';
 import { GenAIHelperService } from '../common/gen-ai-helper.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PipelineEvent, PipelineStepPayload } from 'src/pipeline/pipeline.events';
+import { GenStatus } from '../entities/common/common.enum';
 
 @Injectable()
 export class SoundService {
@@ -29,7 +30,9 @@ export class SoundService {
     if(!series) throw new HttpException(`Series not found: ${episodeId}`, HttpStatus.NOT_FOUND)
     const seriesId = series.id
 
-    const pending = await this.repo.bgm.find({ where: { seriesId, genId: IsNull() } });
+    const pending = await this.repo.bgm.find({
+      where: { seriesId, status: In([GenStatus.PENDING, GenStatus.FAILED]) },
+    });
 
     if (!pending.length) {
       this.logger.log(`[${seriesId}] 생성할 BGM 없음`);
@@ -51,15 +54,23 @@ export class SoundService {
   }
 
   private async generateSingleBgm(seriesId: string, bgm: any): Promise<void> {
-    const fullPrompt = `${bgm.prompt}, instrumental only, no vocals, no lyrics, loopable structure, seamless loop`;
-    const audioBuffer = await this.genAI.lyriaGenerateClip(fullPrompt);
-
-    const s3Key = `series/${seriesId}/bgm/${bgm.id}.mp3`;
-    await this.s3.uploadAudio(s3Key, audioBuffer, 'audio/mpeg');
-
-    bgm.genId = bgm.id; // genId에 자신의 id 저장 (생성 완료 플래그)
+    bgm.status = GenStatus.PROCESSING;
     await this.repo.bgm.save(bgm);
 
-    this.logger.log(`[${bgm.id}] BGM 생성 완료 → ${s3Key}`);
+    try {
+      const fullPrompt = `${bgm.prompt}, instrumental only, no vocals, no lyrics, loopable structure, seamless loop`;
+      const audioBuffer = await this.genAI.lyriaGenerateClip(fullPrompt);
+
+      const s3Key = `series/${seriesId}/bgm/${bgm.id}.mp3`;
+      await this.s3.uploadAudio(s3Key, audioBuffer, 'audio/mpeg');
+
+      bgm.status = GenStatus.DONE;
+      await this.repo.bgm.save(bgm);
+      this.logger.log(`[${bgm.id}] BGM 생성 완료 → ${s3Key}`);
+    } catch (err: any) {
+      bgm.status = GenStatus.FAILED;
+      await this.repo.bgm.save(bgm);
+      throw err;
+    }
   }
 }

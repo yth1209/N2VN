@@ -7,6 +7,7 @@ import { Emotion, StyleKey, BgmCategory } from '../common/constants';
 import { RepositoryProvider } from '../common/repository.provider';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PipelineEvent, PipelineStepPayload } from '../pipeline/pipeline.events';
+import { GenStatus } from '../entities/common/common.enum';
 
 @Injectable()
 export class ParsingService {
@@ -174,9 +175,10 @@ export class ParsingService {
     const bgTempToRealId = new Map<string, string>();
     for (const nb of result.newBackgrounds) {
       const entity = this.repo.background.create({
-        seriesId: series.id,
+        seriesId:    series.id,
         name:        nb.name,
         description: nb.description,
+        status:      GenStatus.PENDING,
       });
       const saved = await this.repo.background.save(entity);
       bgTempToRealId.set(nb.tempId, saved.id);
@@ -189,6 +191,7 @@ export class ParsingService {
         seriesId: series.id,
         category: nb.category,
         prompt:   nb.prompt,
+        status:   GenStatus.PENDING,
       });
       const saved = await this.repo.bgm.save(entity);
       bgmTempToRealId.set(nb.tempId, saved.id);
@@ -224,7 +227,7 @@ export class ParsingService {
         const exists = await this.repo.characterImg.findOne({ where: { characterId: charId, emotion } });
         if (!exists) {
           await this.repo.characterImg.save(
-            this.repo.characterImg.create({ characterId: charId, emotion, genId: null, nobgGenId: null }),
+            this.repo.characterImg.create({ characterId: charId, emotion, genId: null, nobgGenId: null, status: GenStatus.PENDING }),
           );
         }
       }

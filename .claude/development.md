@@ -1,358 +1,383 @@
-# 개발 상세 기획서 — Episode Pipeline Event-Driven Architecture 전환
+# Development: 이미지 생성 엔진 전환 및 상태 관리 고도화
 
-> 작성 기준: `proposal.md` (2026-04-24)
-> 참조: `structure.md`, `episode-pipeline.service.ts`, `parsing.service.ts`
+> plan.md 기반 작성 | 2026-05-25
 
 ---
 
-## 1. 목표 및 범위
+## 변경 파일 목록
 
-### 목표
-`EpisodePipelineService.run()`의 순차 오케스트레이터 방식을 **이벤트 기반 아키텍처(EDA)**로 전환한다.
-- 파싱 완료 후 이미지 생성·BGM 생성 3개 작업을 **병렬** 처리
-- 각 단계의 상태(PENDING→PROCESSING→DONE/FAILED)를 **단일 서비스**에서 중앙 관리
-- `EpisodePipelineService`는 이벤트 발행만 담당, 개별 서비스는 순수 비즈니스 로직만 유지
+| 파일 | 변경 유형 | 내용 요약 |
+|---|---|---|
+| `backend/.env` | 수정 | `IMAGE_PROVIDER`, `GEMINI_IMAGE_MODEL` 추가 |
+| `backend/src/common/gen-ai-helper.service.ts` | 수정 | `geminiGenerateImage()` 메서드 추가 |
+| `backend/src/image/image.service.ts` | 수정 | provider 분기 처리 + status 갱신 완성 |
+| `backend/src/image/prompt/prompt.ts` | 수정 | Gemini용 투명 배경 프롬프트 분기 |
+| `backend/src/parsing/parsing.service.ts` | 수정 | 플레이스홀더 생성 시 `status = PENDING` 명시 |
 
-### 변환 전/후 흐름 비교
+---
 
-**현재 (Orchestrator — 완전 순차)**
-```
-run()
-  → parseCharacters  (await)
-  → parseScenes      (await)
-  → generateCharacterImages   (await)
-  → generateBackgroundImages  (await)
-  → generateBgm               (await)
-```
+## 1. 환경 변수 (`.env`)
 
-**목표 (Event-Driven — 병렬 포함)**
-```
-run() → emit [pipeline.start]
-          ↓
-  CharacterParsingHandler  listens [pipeline.start]
-          ↓  emit [pipeline.characters.done]
-  SceneParsingHandler      listens [pipeline.characters.done]
-          ↓  emit [pipeline.scenes.done]
-  ┌───────┼───────────────────────┐
-  ↓       ↓                      ↓
-CharImg  BackgroundImg          Bgm   (3개 병렬)
-Handler  Handler                Handler
-  ↓       ↓                      ↓
-emit   emit                   emit [pipeline.{step}.done]
-  └───────┴───────────────────────┘
-          ↓  (3개 모두 완료 시)
-  PipelineCoordinatorService → episode.status = DONE
+```dotenv
+# 이미지 생성 엔진 선택: leonardo | gemini
+IMAGE_PROVIDER=gemini
+
+# Gemini 이미지 생성 모델 (nano banana pro)
+GEMINI_IMAGE_MODEL=gemini-3-pro-image-preview
 ```
 
 ---
 
-## 2. 사용 패키지
+## 2. `gen-ai-helper.service.ts` — Gemini 이미지 생성 메서드 추가
 
-```bash
-npm install @nestjs/event-emitter
-```
-
-`AppModule`에 `EventEmitterModule.forRoot({ wildcard: false })` 등록.
-
----
-
-## 3. 파일 변경 목록
-
-### 신규 파일
-
-| 경로 | 역할 |
-|---|---|
-| `src/pipeline/pipeline.module.ts` | PipelineModule 정의 |
-| `src/pipeline/pipeline.events.ts` | 이벤트 상수·페이로드 클래스 |
-| `src/pipeline/handlers/base-pipeline.handler.ts` | 추상 기반 클래스 (Template Method + 상태 관리) |
-| `src/pipeline/handlers/character-parsing.handler.ts` | PARSE_CHARACTERS 핸들러 |
-| `src/pipeline/handlers/scene-parsing.handler.ts` | PARSE_SCENES 핸들러 |
-| `src/pipeline/handlers/character-image.handler.ts` | GENERATE_CHARACTER_IMAGES 핸들러 |
-| `src/pipeline/handlers/background-image.handler.ts` | GENERATE_BACKGROUND_IMAGES 핸들러 |
-| `src/pipeline/handlers/bgm.handler.ts` | GENERATE_BGM 핸들러 |
-
-### 변경 파일
-
-| 경로 | 변경 내용 |
-|---|---|
-| `src/episode/episode-pipeline.service.ts` | `run()` 단순화: emit만 수행, 서비스 의존성 제거 |
-| `src/episode/episode.module.ts` | `PipelineModule` import 추가 |
-| `src/parsing/parsing.service.ts` | 공개 메서드에서 `updateStep` 호출 제거, 메서드명 변경 |
-| `src/image/image.service.ts` | 공개 메서드에서 `updateStep` 호출 제거 |
-| `src/bgm/bgm.service.ts` | 공개 메서드에서 `updateStep` 호출 제거 |
-| `src/app.module.ts` | `EventEmitterModule.forRoot()` 등록 |
-
----
-
-## 4. 이벤트 정의 (`pipeline.events.ts`)
+### 추가할 필드 (생성자)
 
 ```typescript
-import { StepKey } from '../entities/episode-pipeline-step.entity';
+private readonly geminiImageAI:   GoogleGenAI;
+private readonly geminiImageModel: string;
 
-// ─── 이벤트 토픽 상수 ────────────────────────────────────
-export const PipelineEvent = {
-  START:          'pipeline.start',
-  CHARACTERS_DONE:'pipeline.characters.done',
-  SCENES_DONE:    'pipeline.scenes.done',
-  CHAR_IMG_DONE:  'pipeline.charImages.done',
-  BG_IMG_DONE:    'pipeline.bgImages.done',
-  BGM_DONE:       'pipeline.bgm.done',
-  STEP_FAILED:    'pipeline.step.failed',
-} as const;
-
-// ─── 페이로드 ────────────────────────────────────────────
-export class PipelineStartPayload {
-  episodeId: string;
-  seriesId: string;
-  episodeNumber: number;
-}
-
-export class PipelineStepDonePayload {
-  episodeId: string;
-  seriesId: string;
-  episodeNumber: number;
-  stepKey: StepKey;
-}
-
-export class PipelineStepFailedPayload {
-  episodeId: string;
-  stepKey: StepKey;
-  error: string;
-}
+// 생성자 내
+this.geminiImageAI    = new GoogleGenAI({ apiKey: geminiApiKey });
+this.geminiImageModel = this.configService.get<string>('GEMINI_IMAGE_MODEL')
+  ?? 'gemini-3-pro-image-preview';
 ```
 
----
+> `lyriaAI`와 동일한 `GoogleGenAI` 인스턴스를 재사용해도 무방하나, 역할 명확성을 위해 별도 필드로 분리.
 
----
-
-## 6. Handler 구조 — Template Method 패턴 (상속)
-
-5개 핸들러는 try/catch·emit 로직이 완전히 동일하므로 추상 기반 클래스로 공통화한다.
-`@OnEvent` 데코레이터는 컴파일 타임에 문자열이 결정되어야 하므로 자식 클래스에서만 선언.
-
-### BasePipelineHandler (추상 클래스)
-
-step 상태 관리 + try/catch + emit을 모두 담당. `PipelineCoordinatorService` 불필요.
+### 추가할 메서드 `geminiGenerateImage`
 
 ```typescript
-// src/pipeline/handlers/base-pipeline.handler.ts
-export abstract class BasePipelineHandler {
-  constructor(
-    protected readonly eventEmitter: EventEmitter2,
-    protected readonly repo: RepositoryProvider,
-  ) {}
+/**
+ * Gemini 이미지 생성.
+ * initImageBuffer가 있으면 image-to-image (감정 이미지), 없으면 text-to-image.
+ * 응답은 base64 inlineData로 수신 → Buffer 변환 후 반환.
+ */
+async geminiGenerateImage(
+  prompt:           string,
+  initImageBuffer?: Buffer,
+  aspectRatio:      string = '1:1',
+  imageSize:        string = '1K',
+): Promise<{ buffer: Buffer }> {
+  const parts: any[] = [{ text: prompt }];
 
-  protected abstract readonly doneEvent: string;
-  protected abstract readonly stepKey: StepKey;
-
-  protected abstract execute(seriesId: string, episodeNumber: number): Promise<void>;
-
-  protected async run(payload: { episodeId: string; seriesId: string; episodeNumber: number }): Promise<void> {
-    const { episodeId, seriesId, episodeNumber } = payload;
-
-    // 1. PROCESSING
-    await this.repo.pipelineStep.updateStep(episodeId, this.stepKey, StepStatus.PROCESSING, { startedAt: new Date() });
-
-    try {
-      await this.execute(seriesId, episodeNumber);
-
-      // 2. DONE
-      await this.repo.pipelineStep.updateStep(episodeId, this.stepKey, StepStatus.DONE, { finishedAt: new Date() });
-      this.eventEmitter.emit(this.doneEvent, { ...payload, stepKey: this.stepKey });
-
-      // 3. 병렬 3개 step 완료 여부 체크 → episode DONE
-      await this.checkEpisodeDone(episodeId, seriesId);
-
-    } catch (err: any) {
-      // 4. FAILED
-      await this.repo.pipelineStep.updateStep(episodeId, this.stepKey, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
-      await this.repo.episode.update(episodeId, { status: EpisodeStatus.FAILED, errorMessage: `[${this.stepKey}] ${err.message}` });
-    }
+  if (initImageBuffer) {
+    parts.push({
+      inlineData: {
+        mimeType: 'image/png',
+        data:     initImageBuffer.toString('base64'),
+      },
+    });
   }
 
-  // GENERATE_* 3개 step이 모두 DONE이면 episode 완료 처리
-  private async checkEpisodeDone(episodeId: string, seriesId: string): Promise<void> {
-    const episode = await this.repo.episode.findOneBy({ id: episodeId });
-    if (episode?.status === EpisodeStatus.FAILED) return;  // 이미 실패면 스킵
+  const response = await this.geminiImageAI.models.generateContent({
+    model:    this.geminiImageModel,
+    contents: [{ role: 'user', parts }],
+    config:   {
+      responseModalities: ['IMAGE', 'TEXT'],
+      responseFormat: {
+        image: {
+          aspectRatio,
+          imageSize,
+        },
+      },
+    } as any,
+  });
 
-    const parallelSteps = [StepKey.GENERATE_CHARACTER_IMAGES, StepKey.GENERATE_BACKGROUND_IMAGES, StepKey.GENERATE_BGM];
-    const steps = await this.repo.pipelineStep.findBy({ episodeId, stepKey: In(parallelSteps) });
-    const allDone = steps.length === parallelSteps.length && steps.every(s => s.status === StepStatus.DONE);
+  const inlineData = response.candidates?.[0]?.content?.parts
+    ?.find((p: any) => p.inlineData)?.inlineData;
 
-    if (allDone) {
-      await this.repo.episode.update(episodeId, { status: EpisodeStatus.DONE });
-      await this.repo.series.update(seriesId, { latestEpisodeAt: new Date() });
-    }
-  }
+  if (!inlineData?.data) throw new Error('Gemini: image data 없음');
+
+  return { buffer: Buffer.from(inlineData.data, 'base64') };
 }
 ```
-
-### 자식 핸들러 예시 (CharacterParsingHandler)
-
-```typescript
-// src/pipeline/handlers/character-parsing.handler.ts
-@Injectable()
-export class CharacterParsingHandler extends BasePipelineHandler {
-  protected readonly doneEvent = PipelineEvent.CHARACTERS_DONE;
-  protected readonly stepKey   = StepKey.PARSE_CHARACTERS;
-
-  constructor(
-    private readonly parsingService: ParsingService,
-    eventEmitter: EventEmitter2,
-  ) { super(eventEmitter); }
-
-  @OnEvent(PipelineEvent.START)                          // 각 자식에서만 선언
-  handle(payload: PipelineStartPayload) { return this.run(payload); }
-
-  protected execute(seriesId: string, episodeNumber: number) {
-    return this.parsingService.parseCharacters(seriesId, episodeNumber);
-  }
-}
-```
-
-### 5개 핸들러 매핑
-
-| 핸들러 | `doneEvent` | `stepKey` | `@OnEvent` | `execute()` 호출 |
-|---|---|---|---|---|
-| `CharacterParsingHandler` | `CHARACTERS_DONE` | `PARSE_CHARACTERS` | `pipeline.start` | `parsingService.parseCharacters()` |
-| `SceneParsingHandler` | `SCENES_DONE` | `PARSE_SCENES` | `pipeline.characters.done` | `parsingService.parseScenes()` |
-| `CharacterImageHandler` | `CHAR_IMG_DONE` | `GENERATE_CHARACTER_IMAGES` | `pipeline.scenes.done` | `imageService.generateCharacterImages()` |
-| `BackgroundImageHandler` | `BG_IMG_DONE` | `GENERATE_BACKGROUND_IMAGES` | `pipeline.scenes.done` | `imageService.generateBackgroundImages()` |
-| `BgmHandler` | `BGM_DONE` | `GENERATE_BGM` | `pipeline.scenes.done` | `bgmService.generateBgm()` |
 
 ---
 
-## 7. 기존 서비스 리팩터링
+## 3. `image/prompt/prompt.ts` — 투명 배경 프롬프트 분기
 
-### ParsingService 변경
+### 변경 사항
 
-공개 메서드에서 `updateStep` 호출 제거 + 메서드명 변경. 내부 private `_parse*` 메서드는 그대로 유지.
+`getCharacterPrompt`에 `provider` 파라미터 추가. Gemini는 `transparent background` 지시어로, Leonardo는 기존 `solid white background`로 분기.
 
 ```typescript
 // 변경 전
-async parseCharactersForEpisode(seriesId, episodeNumber): Promise<void> {
-  // updateStep PROCESSING ...
-  await this._parseCharacters(seriesId, episodeNumber);
-  // updateStep DONE ...
-}
+const BACKGROUND_BLOCK = 'isolated on a simple solid white background, no background';
 
-// 변경 후 (상태 관리 코드 전부 제거)
-async parseCharacters(seriesId: string, episodeNumber: number): Promise<void> {
-  await this._parseCharacters(seriesId, episodeNumber);
-}
+// 변경 후
+const BACKGROUND_BLOCK_LEONARDO = 'isolated on a simple solid white background, no background';
+const BACKGROUND_BLOCK_GEMINI   = 'transparent background, RGBA transparent PNG, no background elements, alpha channel';
 
-async parseScenes(seriesId: string, episodeNumber: number): Promise<void> {
-  await this._parseScenes(seriesId, episodeNumber);
+export function getCharacterPrompt(
+  style:    string,
+  look:     string,
+  emotion:  Emotion,
+  provider: 'leonardo' | 'gemini' = 'leonardo',
+): string {
+  const bgBlock = provider === 'gemini' ? BACKGROUND_BLOCK_GEMINI : BACKGROUND_BLOCK_LEONARDO;
+  // ... 기존 조합 로직 동일
 }
 ```
 
-### ImageService, BgmService 동일 패턴
-
-- `generateCharacterImages(seriesId, episodeNumber)` — `updateStep` 제거
-- `generateBackgroundImages(seriesId, episodeNumber)` — `updateStep` 제거
-- `generateBgm(seriesId, episodeNumber)` — `updateStep` 제거
-
-> ⚠️ 주의: 기존 서비스 메서드명이 `generateCharacterImages`, `generateBackgroundImagesForSeries`, `generateBgmForSeries`로 혼재. 이 기회에 `generateCharacterImages`, `generateBackgroundImages`, `generateBgm` 으로 통일.
-
 ---
 
-## 8. EpisodePipelineService 단순화
+## 4. `image/image.service.ts` — provider 분기 + status 갱신
 
-`episode.status = PROCESSING` 초기화 후 START 이벤트 발행. 서비스 의존성 전부 제거.
+### 4.1 생성자 변경
 
 ```typescript
-@Injectable()
-export class EpisodePipelineService {
-  constructor(
-    private readonly repo: RepositoryProvider,
-    private readonly eventEmitter: EventEmitter2,
-    // ParsingService, ImageService, BgmService 의존성 제거
-  ) {}
+private readonly imageProvider: 'leonardo' | 'gemini';
 
-  async run(seriesId: string, episodeNumber: number): Promise<void> {
-    const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
-    if (!episode) {
-      this.logger.error(`Episode not found: ${seriesId}/${episodeNumber}`);
-      return;
+constructor(
+  private readonly s3HelperService: S3HelperService,
+  private readonly genAI:           GenAIHelperService,
+  private readonly repo:            RepositoryProvider,
+  private readonly eventEmitter:    EventEmitter2,
+  private readonly configService:   ConfigService,
+) {
+  this.imageProvider =
+    this.configService.get<string>('IMAGE_PROVIDER') === 'gemini' ? 'gemini' : 'leonardo';
+}
+```
+
+### 4.2 `generateBackgroundImages` — status 갱신 추가 + provider 분기
+
+```typescript
+await Promise.all(
+  backgrounds.map(async (bg) => {
+    bg.status = GenStatus.PROCESSING;
+    await this.repo.background.save(bg);
+
+    try {
+      const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
+      let buffer: Buffer;
+
+      if (this.imageProvider === 'gemini') {
+        // 배경: 가로 16:9, 2K 해상도
+        ({ buffer } = await this.genAI.geminiGenerateImage(prompt, undefined, '16:9', '2K'));
+      } else {
+        ({ buffer, imageId: bg.genId } = await this.genAI.leonardoGenerateImage(
+          prompt, undefined, selectedStyleUUID, 1280, 720,
+        ));
+      }
+
+      await this.s3HelperService.uploadImage(
+        `series/${seriesId}/backgrounds/${bg.id}.png`, buffer, 'image/png',
+      );
+      bg.status = GenStatus.DONE;
+      await this.repo.background.save(bg);
+    } catch (err: any) {
+      bg.status = GenStatus.FAILED;
+      await this.repo.background.save(bg);
+      this.logger.error(`[${bg.id}] 배경 이미지 실패: ${err.message}`);
+    }
+  }),
+);
+```
+
+### 4.3 `processCharacter` — DEFAULT 이미지 생성 분기
+
+DEFAULT 이미지 생성 후 buffer를 메모리에 유지해 감정 이미지 생성 시 Gemini image-to-image 입력으로 재사용.
+
+```typescript
+private async processCharacter(
+  seriesId:       string,
+  pendingCharImgs: CharacterImg[],
+  globalArtStyle:  string,
+  selectedStyleUUID: string,
+): Promise<void> {
+  let defaultImg = pendingCharImgs.find((pci) => pci.emotion === Emotion.DEFAULT);
+  if (!defaultImg) throw new HttpException('DEFAULT image entry not found', HttpStatus.BAD_REQUEST);
+
+  const charId   = defaultImg.characterId;
+  const charInfo = defaultImg._characterFk;
+
+  // DEFAULT 이미지가 아직 생성되지 않은 경우 (PENDING or FAILED)
+  let defaultBuffer: Buffer | undefined;
+
+  if (defaultImg.status !== GenStatus.DONE) {
+    this.logger.log(`[${charId}] DEFAULT 이미지 생성 중...`);
+    const defaultPrompt = getCharacterPrompt(
+      globalArtStyle, charInfo.look, Emotion.DEFAULT, this.imageProvider,
+    );
+
+    defaultImg.status = GenStatus.PROCESSING;
+    await this.repo.characterImg.save(defaultImg);
+
+    try {
+      if (this.imageProvider === 'gemini') {
+        // 캐릭터: 세로 9:16, 1K 해상도
+        ({ buffer: defaultBuffer } = await this.genAI.geminiGenerateImage(defaultPrompt, undefined, '9:16', '1K'));
+      } else {
+        const { buffer, imageId } = await this.genAI.leonardoGenerateImage(
+          defaultPrompt, undefined, selectedStyleUUID,
+        );
+        defaultBuffer  = buffer;
+        defaultImg.genId = imageId;
+        defaultImg.nobgGenId = await this.extractAndSaveNobg(seriesId, defaultImg);
+      }
+
+      await this.s3HelperService.uploadImage(
+        `series/${seriesId}/characters/${charId}/DEFAULT.png`, defaultBuffer, 'image/png',
+      );
+      defaultImg.status = GenStatus.DONE;
+      await this.repo.characterImg.save(defaultImg);
+      this.logger.log(`[${charId}] DEFAULT 생성 완료`);
+    } catch (err: any) {
+      defaultImg.status = GenStatus.FAILED;
+      await this.repo.characterImg.save(defaultImg);
+      throw err;
+    }
+  }
+
+  // 감정 이미지 (DEFAULT 이미지가 DONE인 경우만 진행)
+  const remaining = pendingCharImgs.filter((pci) => pci.emotion !== Emotion.DEFAULT);
+  if (remaining.length === 0) return;
+
+  // Gemini image-to-image에서 DEFAULT buffer가 필요한 경우 S3에서 다운로드
+  if (this.imageProvider === 'gemini' && !defaultBuffer) {
+    const s3Key = `series/${seriesId}/characters/${charId}/DEFAULT.png`;
+    defaultBuffer = await this.s3HelperService.downloadImage(s3Key);
+  }
+
+  const emotionPromises = remaining.map((pci) =>
+    this.generateEmotion(
+      seriesId, pci, globalArtStyle, selectedStyleUUID, defaultBuffer,
+    ).catch((err) =>
+      this.logger.error(`[${charId}] ${pci.emotion} 생성 실패: ${err.message}`),
+    ),
+  );
+
+  await Promise.all(emotionPromises);
+}
+```
+
+### 4.4 `generateEmotion` — provider 분기
+
+```typescript
+private async generateEmotion(
+  seriesId:      string,
+  cimg:          CharacterImg,
+  globalArtStyle: string,
+  styleUUID:     string,
+  defaultBuffer?: Buffer,
+): Promise<void> {
+  const charId = cimg.characterId;
+  const prompt = getCharacterPrompt(
+    globalArtStyle, cimg._characterFk.look, cimg.emotion, this.imageProvider,
+  );
+
+  cimg.status = GenStatus.PROCESSING;
+  await this.repo.characterImg.save(cimg);
+
+  try {
+    let buffer: Buffer;
+
+    if (this.imageProvider === 'gemini') {
+      // DEFAULT 이미지를 입력으로 넣어 표정만 변경 (image-to-image), 캐릭터: 9:16 1K
+      ({ buffer } = await this.genAI.geminiGenerateImage(prompt, defaultBuffer, '9:16', '1K'));
+    } else {
+      const result = await this.genAI.leonardoGenerateImage(
+        prompt, cimg.genId ?? undefined, styleUUID,
+      );
+      buffer       = result.buffer;
+      cimg.genId   = result.imageId;
+      cimg.nobgGenId = await this.extractAndSaveNobg(seriesId, cimg);
     }
 
-    // episode 상태 초기화 (Coordinator 없이 여기서 직접)
-    await this.repo.episode.update(episode.id, { status: EpisodeStatus.PROCESSING });
-
-    this.eventEmitter.emit(PipelineEvent.START, {
-      episodeId:     episode.id,
-      seriesId,
-      episodeNumber,
-    } satisfies PipelineStartPayload);
+    await this.s3HelperService.uploadImage(
+      `series/${seriesId}/characters/${charId}/${cimg.emotion}.png`, buffer, 'image/png',
+    );
+    cimg.status = GenStatus.DONE;
+    await this.repo.characterImg.save(cimg);
+  } catch (err: any) {
+    cimg.status = GenStatus.FAILED;
+    await this.repo.characterImg.save(cimg);
+    throw err;
   }
 }
 ```
 
 ---
 
-## 9. PipelineModule
+## 5. `s3-helper.service.ts` — `downloadImage` 메서드 추가
+
+Gemini image-to-image 시 DEFAULT 이미지 buffer가 메모리에 없는 경우 S3에서 다운로드.
 
 ```typescript
-@Module({
-  imports: [
-    CommonModule,
-    ParsingModule,
-    ImageModule,
-    BgmModule,
-  ],
-  providers: [
-    CharacterParsingHandler,
-    SceneParsingHandler,
-    CharacterImageHandler,
-    BackgroundImageHandler,
-    BgmHandler,
-  ],
-})
-export class PipelineModule {}
-```
-
-`EpisodeModule`에서 `PipelineModule` import 추가.
-
----
-
-## 10. AppModule 변경
-
-```typescript
-@Module({
-  imports: [
-    EventEmitterModule.forRoot({ wildcard: false }),  // 추가
-    // ... 기존 모듈들
-  ],
-})
-export class AppModule {}
+async downloadImage(key: string): Promise<Buffer> {
+  const command = new GetObjectCommand({ Bucket: this.bucket, Key: key });
+  const response = await this.s3Client.send(command);
+  const stream = response.Body as Readable;
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+  });
+}
 ```
 
 ---
 
-## 11. 구현 순서
+## 6. `parsing.service.ts` — 플레이스홀더 생성 시 status 명시
 
-1. `npm install @nestjs/event-emitter` 설치
-2. `AppModule`에 `EventEmitterModule.forRoot()` 등록
-3. `pipeline.events.ts` — 이벤트 상수·페이로드 작성
-4. `ParsingService`, `ImageService`, `BgmService` — `updateStep` 제거 + 메서드명 통일
-5. `BasePipelineHandler` 작성 (상태 관리 + try/catch + emit + 병렬 완료 체크)
-6. 핸들러 5개 작성 (`character-parsing`, `scene-parsing`, `character-image`, `background-image`, `bgm`)
-7. `PipelineModule` 작성
-8. `EpisodePipelineService.run()` 단순화 (episode PROCESSING 초기화 + emit만)
-9. `EpisodeModule`에 `PipelineModule` import 추가
+씬 파싱 후 `character_img` 플레이스홀더 생성 시 `status = PENDING` 명시적으로 설정.
+
+```typescript
+// 변경 전
+await this.repo.characterImg.save({ characterId, emotion });
+
+// 변경 후
+await this.repo.characterImg.save({
+  characterId,
+  emotion,
+  status: GenStatus.PENDING,
+});
+```
 
 ---
 
-## 12. 고려 사항 및 제약
+## 7. status 흐름 정리
 
-### 이벤트 핸들러 에러 처리
-`@OnEvent` 핸들러에서 throw된 예외는 NestJS 이벤트 에미터에 의해 조용히 무시될 수 있음. 각 핸들러 내부에서 반드시 try/catch로 감싸고 `pipeline.step.failed` 이벤트를 직접 emit해야 함.
+```
+[씬 파싱 완료 시]
+character_img 플레이스홀더 생성 → status = PENDING
 
-### 병렬 step 중 하나 실패 시
-`pipeline.step.failed` 수신 → `PipelineCoordinator`가 episode FAILED 처리. 이미 진행 중인 다른 병렬 작업은 자연 완료될 때까지 실행됨 (중단 없음). `checkAllParallelDone` 은 episode가 이미 FAILED인 경우 스킵.
+[이미지 생성 시작]
+→ status = PROCESSING  (재진입/중복 생성 방지)
 
-### 동일 이벤트 중복 발행 방지
-`scenes.done` 이벤트 수신 시 3개 병렬 핸들러가 동시에 트리거됨. 각 핸들러는 독립적인 step을 처리하므로 DB 충돌 없음.
+[이미지 생성 성공]
+→ S3 업로드 완료
+→ status = DONE
 
-### 기존 step 초기화 타이밍
-`pipeline.start` 이전에 `EpisodePipelineStep` 레코드가 이미 생성되어 있어야 함 (현재 `episode.service.ts`에서 생성). `PipelineCoordinatorService.onStart()`에서 step들이 PENDING 상태인지 확인 후, 이미 있으면 status를 PENDING으로 리셋.
+[이미지 생성 실패]
+→ status = FAILED
+→ 다음 실행 시 FAILED 레코드도 재시도 대상에 포함됨
+```
+
+기존 `status in (PENDING, FAILED)` 조회 조건은 이미 적용되어 있으므로 변경 불필요.
+
+---
+
+## 8. 작업 순서 (구현 체크리스트)
+
+1. `.env`에 `IMAGE_PROVIDER`, `GEMINI_IMAGE_MODEL` 추가
+2. `gen-ai-helper.service.ts`: `geminiImageModel` 필드 + `geminiGenerateImage()` 추가
+3. `image/prompt/prompt.ts`: `getCharacterPrompt`에 `provider` 파라미터 추가
+4. `s3-helper.service.ts`: `downloadImage()` 추가
+5. `image/image.service.ts`:
+   - 생성자에 `imageProvider` 필드 추가
+   - `generateBackgroundImages` status 갱신 + provider 분기
+   - `processCharacter` DEFAULT buffer 유지 + provider 분기
+   - `generateEmotion` provider 분기 + status 갱신
+6. `parsing.service.ts`: 플레이스홀더 생성 시 `status = PENDING` 추가
+
+---
+
+## 9. 주의사항
+
+- **Gemini NOBG**: `extractAndSaveNobg`는 Gemini provider 시 호출하지 않음. 투명 배경은 생성 프롬프트로 처리.
+- **`initImageId` vs `initImageBuffer`**: Leonardo는 서버에 업로드된 이미지 ID(`genId`)를 참조. Gemini는 이미지 bytes를 직접 전달. 메서드 시그니처가 다름.
+- **DEFAULT buffer 유실**: `processCharacter` 실행 도중 DEFAULT가 이미 DONE인 경우 buffer 없이 진입. S3 `downloadImage`로 보완 (구현 항목 4 참조).
+- **`configService` 주입**: `ImageService`의 기존 생성자에 `ConfigService` 의존성 추가 필요. `image.module.ts`에서 `ConfigModule` import 여부 확인.

@@ -9,6 +9,7 @@ import { EpisodeResponseDto } from './dto/episode.response.dto';
 import { EpisodeStatus } from '../entities/episode.entity';
 import { StepKey, STEP_ORDER, StepStatus } from '../entities/episode-pipeline-step.entity';
 import { Emotion } from '../common/constants';
+import { GenStatus } from 'src/entities/common/common.enum';
 
 type VnCharacterMap = Record<string, { name: string; sprites: Record<string, string> }>;
 
@@ -75,7 +76,7 @@ export class EpisodeService {
 
     // 6. S3 업로드: novel.txt
     await this.s3Helper.uploadText(
-      `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
+      `series/${seriesId}/episodes/${episode.id}/novel.txt`,
       file.buffer.toString('utf-8'),
     );
 
@@ -149,11 +150,8 @@ export class EpisodeService {
       const images  = imagesByChar.get(char.id) ?? [];
       const sprites: Record<string, string> = {};
       for (const img of images) {
-        if (img.nobgGenId) {
-          sprites[img.emotion] = `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}_NOBG.png`;
-        } else if (img.genId) {
-          sprites[img.emotion] = `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}.png`;
-        }
+        if(img.status !== GenStatus.DONE) continue;
+        sprites[img.emotion] = `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}_NOBG.png`;
       }
       const defaultUrl = sprites[Emotion.DEFAULT];
       if (defaultUrl) {
@@ -167,14 +165,14 @@ export class EpisodeService {
     // 배경 맵
     const sceneMap: Record<string, string> = {};
     for (const bg of backgrounds) {
-      if (bg.genId) sceneMap[bg.id] = `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png`;
+      if (bg.status === GenStatus.DONE) sceneMap[bg.id] = `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png`;
     }
 
     // BGM 맵
     const bgmList = await this.repo.bgm.find({ where: { seriesId } });
     const bgmMap: Record<string, string | null> = {};
     for (const bgm of bgmList) {
-      bgmMap[bgm.id] = bgm.genId
+      bgmMap[bgm.id] = bgm.status === GenStatus.DONE
         ? `${baseUrl}/series/${seriesId}/bgm/${bgm.id}.mp3`
         : null;
     }

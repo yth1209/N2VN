@@ -1,31 +1,37 @@
-지금 backend\src\episode\episode-pipeline.service.ts의 run에서 오케스트레이터 방식으로 호출하고 있는데 이걸 event driven 아키텍처로 수정.
+지금 character img, background img를 leonardo api를 사용하고 있는데 이걸 gemini api를 사용하도록 수정할거야. 
+사용 모델은 nano banana pro.
 
-episod-pipline는 global_pipline_start event를 발행.
+# 해야할 일
+1. leonardo api 호출 로직은 남겨두고 option으로 leonardo, gemini 선택하여 이미지 생성 할 수 있도록 수정. 단 rest api request body가 아닌 .env로 설정. 이 기능은 /backend/src/image 내의 파일들 참고
+2. 현재 git log를 보면 알겠지면 기존에는 생성 완료 여부를 genId is null로 판단했음. 근데 gemini의 경우 genId 자체가 존재하지 않아 별도의 status로 관리하도록 수정하고 있는중이었고, 이를 마무리 지으면됨. (entities/backgourd.entity.ts, bgm.entity.ts, character-img.entity.ts 참고)
 
-그러면 이제 그 이벤트를 character parsing이 listen하여 character parsing을 진행. 
+# 참고 사항
+gemini api 호출 방법
 
-character parsing이 완료되면 character parsing done event 발행
+import { GoogleGenAI } from "@google/genai";
+import * as fs from "node:fs";
 
-이를 scene parser가 listen하여 parsing 진행. 
-완료되면 scene parsing done event 발행. 
+async function main() {
 
-이를 병렬적으로 진행되도 상관없는 background img, bgm, character img generation이 event 받아서 진행.
-완료 되면 개별 done event 발행
+  const ai = new GoogleGenAI({});
 
-여기서 각 process의 status를 관리하는 로직은 공통된 Event Handler(? 명칭은 명확하지 않음)이 관리했으면 좋겠음. 혹은 더 좋은 아키텍처가 있으면 공통화만 되면 됨 
+  const prompt =
+    "Create a picture of a nano banana dish in a fancy restaurant with a Gemini theme";
 
-async parse(seriesId: string, episodeNumber: number): Promise<void> {
-    const episode = await this.repo.episode.findOneBy({ seriesId, episodeNumber });
-    const episodeId = episode?.id;
-    if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.PROCESSING, { startedAt: new Date() });
-
-    try {
-      # 개별 parse. 여기만 다름
-      await this._parseScenes(seriesId, episodeNumber);
-      
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.DONE, { finishedAt: new Date() });
-    } catch (err: any) {
-      if (episodeId) await this.repo.pipelineStep.updateStep(episodeId, StepKey.PARSE_SCENES, StepStatus.FAILED, { finishedAt: new Date(), errorMessage: err.message });
-      throw err;
+  const response = await ai.models.generateContent({
+    model: "gemini-3.1-flash-image-preview",
+    contents: prompt,
+  });
+  for (const part of response.candidates[0].content.parts) {
+    if (part.text) {
+      console.log(part.text);
+    } else if (part.inlineData) {
+      const imageData = part.inlineData.data;
+      const buffer = Buffer.from(imageData, "base64");
+      fs.writeFileSync("gemini-native-image.png", buffer);
+      console.log("Image saved as gemini-native-image.png");
     }
   }
+}
+
+main();

@@ -1,5 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn } from 'typeorm';
 import { Series } from './series.entity';
+import { GenStatus } from './common/common.enum';
 
 @Entity('background')
 export class Background {
@@ -21,4 +22,7 @@ export class Background {
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   genId: string;
+
+  @Column({ type: 'enum', enum: GenStatus, nullable: true })
+  status: GenStatus;
 }
