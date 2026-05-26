@@ -84,6 +84,8 @@ function openVnPlayer(episodeId) {
 }
 
 function closeVnPlayer() {
+  const iframe = document.getElementById('vn-iframe');
+  iframe.contentWindow?.postMessage({ type: 'stop' }, '*');
   document.getElementById('vn-modal').classList.add('hidden');
   document.body.style.overflow = '';
   if (currentEpisodeId !== null) {

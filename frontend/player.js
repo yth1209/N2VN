@@ -37,6 +37,12 @@ const endScreen   = document.getElementById('end-screen');
 
 // ── Entry ──────────────────────────────────────────
 window.addEventListener('message', async (event) => {
+  if (event.data?.type === 'stop') {
+    bgmAudio.pause();
+    bgmAudio.currentTime = 0;
+    currentBgmId = null;
+    return;
+  }
   const { seriesId, episodeId } = event.data ?? {};
   if (!seriesId || !episodeId) return;
   await loadScript(seriesId, episodeId);
@@ -198,7 +204,12 @@ function showCharacter(charId, emotion, position) {
     if (oldSlot) oldSlot.innerHTML = '';
   }
 
-  slot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+  const existingImg = slot.querySelector(`img[data-char-id="${charId}"]`);
+  if (existingImg) {
+    existingImg.src = url;
+  } else {
+    slot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+  }
   onScreen[charId] = { emotion, position };
 }
 
@@ -238,11 +249,12 @@ function showDialogue(speaker, text) {
   advanceHint.style.opacity = '0';
 
   if (speaker) {
-    speakerEl.textContent    = speaker;
-    speakerEl.style.display  = 'block';
+    speakerEl.textContent      = speaker;
+    speakerEl.style.visibility = 'visible';
     highlightSpeaker(speaker);
   } else {
-    speakerEl.style.display = 'none';
+    speakerEl.textContent      = ' ';
+    speakerEl.style.visibility = 'hidden';
     clearHighlights();
   }
 

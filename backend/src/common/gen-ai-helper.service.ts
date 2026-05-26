@@ -6,6 +6,7 @@ import { StructuredOutputParser } from '@langchain/core/output_parsers';
 import { GoogleGenAI } from '@google/genai';
 import { ZodSchema } from 'zod';
 import axios from 'axios';
+import { removeBackground } from '@imgly/background-removal-node';
 
 @Injectable()
 export class GenAIHelperService {
@@ -210,6 +211,15 @@ export class GenAIHelperService {
       }
       return null;
     });
+  }
+
+  // ── Background Removal ───────────────────────────────────────────────────────
+
+  async removeImageBackground(inputBuffer: Buffer): Promise<Buffer> {
+    const blob = new Blob([new Uint8Array(inputBuffer)], { type: 'image/png' });
+    const resultBlob = await removeBackground(blob);
+    const arrayBuffer = await resultBlob.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   }
 
   // ── 공통 유틸 ────────────────────────────────────────────────────────────────

@@ -16,4 +16,10 @@ export class ImageController {
     this.imageService.eventGenBackgroundImages(episodeId).catch(() => { });
     return { success: true, message: '배경 이미지 생성이 백그라운드에서 시작되었습니다.' };
   }
+
+  @Post('characters/nobg-reprocess')
+  async reprocessNobg(@Body('seriesId') seriesId: string) {
+    this.imageService.reprocessNobgForSeries(seriesId).catch(() => { });
+    return { success: true, message: 'NOBG 재생성이 백그라운드에서 시작되었습니다.' };
+  }
 }

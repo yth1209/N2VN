@@ -157,8 +157,9 @@ export class ImageService {
       try {
         if (this.imageProvider === 'gemini') {
           ({ buffer: defaultBuffer } = await this.genAI.geminiGenerateImage(defaultPrompt, undefined, '9:16', '1K'));
+          const defaultNobgBuffer = await this.genAI.removeImageBackground(defaultBuffer);
           await this.s3HelperService.uploadImage(
-          `series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, defaultBuffer, 'image/png',
+          `series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, defaultNobgBuffer, 'image/png',
           );
         } else {
           const { buffer, imageId } = await this.genAI.leonardoGenerateImage(defaultPrompt, undefined, styleUUID);
@@ -219,8 +220,9 @@ export class ImageService {
 
       if (this.imageProvider === 'gemini') {
         ({ buffer } = await this.genAI.geminiGenerateImage(prompt, defaultBuffer, '9:16', '1K'));
+        const nobgBuffer = await this.genAI.removeImageBackground(buffer);
         await this.s3HelperService.uploadImage(
-        `series/${seriesId}/characters/${charId}/${cimg.emotion}_NOBG.png`, buffer, 'image/png',
+        `series/${seriesId}/characters/${charId}/${cimg.emotion}_NOBG.png`, nobgBuffer, 'image/png',
         );
       } else {
         const result = await this.genAI.leonardoGenerateImage(prompt, defaultGenId, styleUUID);
@@ -239,6 +241,39 @@ export class ImageService {
       await this.repo.characterImg.save(cimg);
       throw err;
     }
+  }
+
+  async reprocessNobgForSeries(seriesId: string): Promise<void> {
+    const charImgs = await this.repo.characterImg
+      .createQueryBuilder('ci')
+      .innerJoin('ci._characterFk', 'c')
+      .where('c.seriesId = :seriesId', { seriesId })
+      .andWhere('ci.status = :status', { status: GenStatus.DONE })
+      .getMany();
+
+    if (!charImgs.length) {
+      this.logger.log(`[${seriesId}] NOBG 재생성 대상 없음`);
+      return;
+    }
+
+    this.logger.log(`[${seriesId}] NOBG 재생성 시작: ${charImgs.length}개`);
+
+    const results = await Promise.allSettled(
+      charImgs.map(async (cimg) => {
+        const srcKey  = `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}.png`;
+        const destKey = `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`;
+        const original = await this.s3HelperService.downloadImage(srcKey);
+        const nobg     = await this.genAI.removeImageBackground(original);
+        await this.s3HelperService.uploadImage(destKey, nobg, 'image/png');
+        this.logger.log(`[${cimg.characterId}/${cimg.emotion}] NOBG 재생성 완료`);
+      }),
+    );
+
+    const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+    failed.forEach((r) => this.logger.error(`NOBG 재생성 실패: ${r.reason?.message}`));
+    this.logger.log(
+      `[${seriesId}] NOBG 재생성 완료 (성공: ${charImgs.length - failed.length} / 실패: ${failed.length})`,
+    );
   }
 
   private async extractAndSaveNobg(seriesId: string, cimg: CharacterImg): Promise<string> {

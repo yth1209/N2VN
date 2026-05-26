@@ -1,6 +1,6 @@
 ### API 테스트용 변수 및 설정
 @baseUrl = http://localhost:3000
-@seriesId = d8610d94-3e2b-11f1-b3ff-067202af79bf
+@seriesId = 90d173fa-0456-4187-8bdb-54260e24ea57
 @episodeNumber = 1
 @jwtToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlY2Y1MWQ3My05YTIxLTRlMzQtOGNkNC03NzYwNTViNmZkYWYiLCJsb2dpbklkIjoieXRoMTIwOSIsImlhdCI6MTc3NjkwNjI1MCwiZXhwIjoxNzc2OTkyNjUwfQ.yYyst20_EqNjGOC6B8GtNJBY6eZ7A5xSSxEmp-e69rM
 
@@ -148,6 +148,14 @@ Content-Type: application/json
 
 ### 17. 배경 이미지 생성 (POST) — 백그라운드 실행
 POST {{baseUrl}}/images/backgrounds
+Content-Type: application/json
+
+{
+    "seriesId": "{{seriesId}}"
+}
+
+### 18. 캐릭터 NOBG 재생성 (POST) — 기존 이미지 배경 제거 일괄 재처리, 백그라운드 실행
+POST {{baseUrl}}/images/characters/nobg-reprocess
 Content-Type: application/json
 
 {

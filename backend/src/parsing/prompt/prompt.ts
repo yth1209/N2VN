@@ -52,7 +52,9 @@ Then reference them by tempId in the scenes array.
 - isEntry: true on the FIRST line of a character within a scene. narrator always false.
 - isExit: true on the LAST line of a character within a scene. narrator always false.
 - A character appearing only once in a scene has both isEntry and isExit as true.
-- position: "center" if alone on screen; "left" or "right" for 2+ characters. narrator always "center".
+- position: "center" if alone on screen; "left" or "right" for 2+ characters. (Note: Narrator is always "center" and excluded from the character count).
+- position Exception: If a single character image represents a group of multiple people (e.g., a crowd or mob), it must be positioned "center" alone, and all other characters must be cleared from the screen.
+
 
 Known Characters Information:
 {characters_info}

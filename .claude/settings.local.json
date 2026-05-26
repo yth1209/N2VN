@@ -4,7 +4,9 @@
       "Bash(node -e ' *)",
       "Bash(npm install *)",
       "Bash(npx ts-node *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(find \"/mnt/c/Users/yth00/OneDrive - postech.ac.kr/1. Lecture/9th Semester/과제연구/N2VN/frontend\" -type f -name \"*.css\" -o -name \"*.scss\" -o -name \"*.jsx\" -o -name \"*.js\" -o -name \"*.tsx\" -o -name \"*.ts\" | head -50)",
+      "Read(//mnt/c/Users/yth00/OneDrive - postech.ac.kr/1. Lecture/9th Semester/과제연구/N2VN/**)"
     ]
   }
 }
