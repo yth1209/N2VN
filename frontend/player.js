@@ -189,7 +189,7 @@ function showCharacter(charId, emotion, position) {
   const url = charData.sprites[emotion] || charData.sprites['DEFAULT'];
   if (!url) return;
 
-  const slot = charSlots[position] || charSlots['center'];
+  const newSlot = charSlots[position] || charSlots['center'];
 
   // 같은 슬롯에 있던 다른 캐릭터 제거
   for (const [existId, info] of Object.entries(onScreen)) {
@@ -198,18 +198,45 @@ function showCharacter(charId, emotion, position) {
     }
   }
 
-  // 이 캐릭터가 다른 슬롯에 있었다면 그 슬롯 비우기
-  if (onScreen[charId] && onScreen[charId].position !== position) {
-    const oldSlot = charSlots[onScreen[charId].position];
-    if (oldSlot) oldSlot.innerHTML = '';
+  const prevInfo = onScreen[charId];
+
+  if (prevInfo && prevInfo.position !== position) {
+    // 위치 변경 → FLIP 슬라이드 애니메이션
+    const oldSlot = charSlots[prevInfo.position];
+    const oldImg  = oldSlot?.querySelector(`img[data-char-id="${charId}"]`);
+
+    if (oldImg) {
+      const oldRect = oldImg.getBoundingClientRect();
+      oldSlot.innerHTML = '';
+      newSlot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+      const newImg  = newSlot.querySelector(`img[data-char-id="${charId}"]`);
+      const newRect = newImg.getBoundingClientRect();
+
+      const dx = oldRect.left - newRect.left;
+      newImg.style.transition = 'none';
+      newImg.style.transform  = `translateX(${dx}px)`;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          newImg.style.transition = 'transform 0.4s ease';
+          newImg.style.transform  = 'translateX(0)';
+          newImg.addEventListener('transitionend', () => {
+            newImg.style.transition = '';
+            newImg.style.transform  = '';
+          }, { once: true });
+        });
+      });
+    } else {
+      newSlot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+    }
+  } else {
+    const existingImg = newSlot.querySelector(`img[data-char-id="${charId}"]`);
+    if (existingImg) {
+      existingImg.src = url;
+    } else {
+      newSlot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+    }
   }
 
-  const existingImg = slot.querySelector(`img[data-char-id="${charId}"]`);
-  if (existingImg) {
-    existingImg.src = url;
-  } else {
-    slot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
-  }
   onScreen[charId] = { emotion, position };
 }
 

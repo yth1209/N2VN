@@ -144,17 +144,14 @@ export class ParsingService {
           characterId: z.string().describe(
             '화자의 고유 ID (characters_info 참고). 나레이션인 경우 narrator',
           ),
-          dialog:   z.string().describe('대사 또는 서술 내용 문장 원문 (번역 금지)'),
-          action:   z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe('화자의 행동/동작. 항상 제약 조건에 맞는 단어 사용'),
-          emotion:  z.nativeEnum(Emotion).describe(
-            `화자의 감정 (반드시 다음 중 한 가지만 선택: ${Object.values(Emotion).join(', ')})`,
-          ),
-          look:     z.string().describe('화자의 표정이나 드러나는 외모 (알 수 없으면 unknown)'),
-          isEntry:  z.boolean().describe('씬 내 캐릭터 첫 번째 등장인 경우 true, narrator는 항상 false'),
-          isExit:   z.boolean().describe('씬 내 캐릭터 마지막 대사인 경우 true, narrator는 항상 false'),
-          position: z.enum(['left', 'center', 'right']).describe(
-            '캐릭터의 화면 위치. 혼자면 center, 2인 이상이면 left/right. narrator는 center',
-          ),
+          dialog:        z.string().describe('대사 또는 서술 내용 문장 원문 (번역 금지)'),
+          currentScreen: z.array(z.object({
+            characterId: z.string().describe('화면에 표시된 캐릭터 ID'),
+            position:    z.enum(['left', 'center', 'right']).describe('현재 이 캐릭터의 화면 위치'),
+            emotion:     z.nativeEnum(Emotion).describe('현재 이 캐릭터의 감정'),
+            look:        z.string().describe('현재 이 캐릭터의 외모/표정 (영어)'),
+            action:      z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe('현재 이 캐릭터의 동작'),
+          })).describe('이 대사가 출력되는 순간 화면에 있는 모든 캐릭터 목록 (narrator 제외)'),
         })).describe('이 씬에 포함되는 모든 대사와 나레이션을 순서대로 담은 배열'),
       })),
     });
@@ -215,10 +212,9 @@ export class ParsingService {
     const emotionMap = new Map<string, Set<Emotion>>();
     for (const scene of resolvedScenes) {
       for (const dialogue of scene.dialogues) {
-        const charId = dialogue.characterId;
-        if (charId && charId !== 'narrator' && charId !== 'unknown') {
-          if (!emotionMap.has(charId)) emotionMap.set(charId, new Set<Emotion>([Emotion.DEFAULT]));
-          emotionMap.get(charId)!.add(dialogue.emotion as Emotion);
+        for (const entry of dialogue.currentScreen ?? []) {
+          if (!emotionMap.has(entry.characterId)) emotionMap.set(entry.characterId, new Set<Emotion>([Emotion.DEFAULT]));
+          emotionMap.get(entry.characterId)!.add(entry.emotion as Emotion);
         }
       }
     }

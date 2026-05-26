@@ -1,171 +1,280 @@
-# Development Plan: Gemini NOBG 실제 투명화 적용
+# development.md — 씬 내 캐릭터 화면 배치 개편
 
-## 배경 및 목적
-
-Gemini 이미지 생성 모드(`IMAGE_PROVIDER=gemini`)에서 `_NOBG.png` 저장 시,
-Gemini에 배경 제거를 직접 요청하면 진짜 알파 채널이 아닌 체커 무늬 색상 이미지를 반환한다.
-`@imgly/background-removal-node`를 사용해 서버 측에서 실제 배경 제거(알파 채널 적용)를 수행한 뒤 저장하도록 수정한다.
+> plan.md 기반 개발 상세 기획서.
+> 아키텍처/스키마 배경지식은 structure.md 참조.
 
 ---
 
-## 변경 범위
+## 1. 변경 범위 요약
 
 | 파일 | 변경 유형 | 내용 |
 |---|---|---|
-| `backend/package.json` | 의존성 추가 | `@imgly/background-removal-node` 설치 |
-| `backend/src/common/gen-ai-helper.service.ts` | 메서드 추가 | `removeImageBackground(buffer)` |
-| `backend/src/image/image.service.ts` | 로직 수정 | Gemini 경로에서 NOBG 저장 전 배경 제거 호출 |
+| `backend/src/parsing/prompt/prompt.ts` | 수정 | scene_prompt DIALOGUE RULES 교체 |
+| `backend/src/parsing/parsing.service.ts` | 수정 | Zod 스키마 — `position`, `isEntry`, `isExit` 제거, `currentScreen[]` 추가 |
+| `backend/src/episode/episode.service.ts` | 수정 | `buildVnScript` 로직 전면 교체 (currentScreen diff 기반) |
+| `frontend/player.js` | 변경 없음 | 스크립트 포맷이 동일하게 유지되므로 수정 불필요 |
+
+> **기존 소설 영향 없음:** `buildVnScript`에서 `??` 기본값 처리로 구버전 scenes.json도 계속 동작.
 
 ---
 
-## 1. 패키지 설치
+## 2. scenes.json 포맷 변경
 
-```bash
-cd backend
-npm install @imgly/background-removal-node
-```
+### 2.1 AS-IS (dialogue 구조)
 
-- 최초 실행 시 로컬 AI 모델을 다운로드하여 캐싱; 이후 빠르게 동작함.
-- Node.js 서버 환경 전용 패키지 (`@imgly/background-removal-node`).
-  브라우저용(`@imgly/background-removal`)과 구분할 것.
-
----
-
-## 2. `GenAIHelperService` — `removeImageBackground` 메서드 추가
-
-**파일**: `backend/src/common/gen-ai-helper.service.ts`
-
-기존 서비스 하단(공통 유틸 섹션)에 아래 메서드를 추가한다.
-
-```typescript
-// ── Background Removal ───────────────────────────────────────────────────────
-
-/**
- * @imgly/background-removal-node로 이미지 배경 제거.
- * Gemini 이미지 생성 후 _NOBG.png 저장 전 단계에 호출.
- * 모델은 최초 1회만 다운로드되고 이후 캐시에서 로드됨.
- */
-async removeImageBackground(inputBuffer: Buffer): Promise<Buffer> {
-  const { removeBackground } = await import('@imgly/background-removal-node');
-  const resultBlob = await removeBackground(inputBuffer);
-  const arrayBuffer = await resultBlob.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+```json
+{
+  "characterId": "1_char_1",
+  "dialog": "에이, 선생님도 참.",
+  "action": "IDLE",
+  "emotion": "SMILE",
+  "look": "cheerful smile",
+  "isEntry": false,
+  "isExit": false,
+  "position": "right"
 }
 ```
 
-- dynamic import를 사용해 모듈 로드 시점을 지연시켜 서버 시작 속도에 영향 없음.
-- 반환값은 `Buffer` (PNG with alpha channel).
+### 2.2 TO-BE (dialogue 구조)
 
----
-
-## 3. `ImageService` — Gemini NOBG 저장 로직 수정
-
-**파일**: `backend/src/image/image.service.ts`
-
-### 3-1. `processCharacter` — DEFAULT 이미지
-
-**AS-IS** (line 158–162):
-```typescript
-if (this.imageProvider === 'gemini') {
-  ({ buffer: defaultBuffer } = await this.genAI.geminiGenerateImage(defaultPrompt, undefined, '9:16', '1K'));
-  await this.s3HelperService.uploadImage(
-    `series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, defaultBuffer, 'image/png',
-  );
+```json
+{
+  "characterId": "1_char_1",
+  "dialog": "에이, 선생님도 참.",
+  "currentScreen": [
+    {
+      "characterId": "1_char_1",
+      "position": "left",
+      "emotion": "SMILE",
+      "look": "cheerful smile",
+      "action": "IDLE"
+    },
+    {
+      "characterId": "helmet-gang-id",
+      "position": "right",
+      "emotion": "ANGRY",
+      "look": "holding weapons",
+      "action": "SHAKE"
+    }
+  ]
 }
 ```
 
-**TO-BE**:
+**변경 포인트:**
+- `action` / `emotion` / `look` 필드 삭제 (dialogue 최상위에서 제거) — 해당 정보는 `currentScreen` 내 캐릭터 항목에 포함
+- `position` 필드 삭제 (dialogue 최상위에서 제거)
+- `isEntry` / `isExit` 필드 삭제 — 등장/퇴장 여부는 `currentScreen`의 포함 여부로 결정
+- `currentScreen` 배열 추가 — 해당 대사가 출력되는 순간 화면에 있는 **모든** 캐릭터 목록 (action/emotion/look/position 포함)
+- narrator의 경우 `currentScreen`은 현재 화면 상태를 그대로 유지 (narration 중에도 화면 구성은 존재)
+
+---
+
+## 3. `parsing/prompt/prompt.ts` 변경
+
+`scene_prompt` 내 `[DIALOGUE RULES]` 블록을 아래로 교체한다.
+
+```
+[DIALOGUE RULES]
+
+# 1. Text & Metadata Rules
+- Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field. Do NOT translate.
+- characterId: match the speaker to their ID using characters_info. Use "narrator" for narration, "unknown" for unidentified characters.
+- Narrator Blocks: EXCLUDE purely visual descriptions or emotional expositions. ONLY keep essential plot advancements. Summarize and compress. Avoid consecutive narrator blocks.
+
+# 2. Screen State & Positioning Rules (CRITICAL)
+- "currentScreen" Field: Every dialogue block MUST include a "currentScreen" array detailing ONLY the visible characters on screen during that turn. Do NOT use entry/exit flags. The presence or absence of a character in this array dictates their entry or exit.
+- Narrator Exclusion: The narrator is EXCLUDED from the "currentScreen" array.
+
+# 3. Dynamic Layout Adjustment (Inside "currentScreen")
+- Each currentScreen entry contains: characterId, position, emotion, look, action — for that character AT THIS MOMENT.
+- emotion / look: Provide ONLY in English.
+- action: MUST ONLY be one of: ["IDLE", "ATTACK", "SHAKE"].
+- 1 Character: MUST be "center".
+- 2 Characters: MUST be "left" and "right". (If a 2nd character joins a single character, the existing character must be moved to "left" or "right").
+- 3 Characters: MUST be "left", "center", and "right".
+- Overcrowding Prevention: MAX 3 characters. If a 4th must appear, REMOVE the least active character from the "currentScreen" array to make room.
+
+# 4. Group Character Monopoly Exception
+- If a character represents a group (e.g., crowd, mob, gang):
+  * They MUST be alone on screen.
+  * ALL other characters MUST be completely removed from the "currentScreen" array in that turn.
+  * The group character's position MUST be "center".
+```
+
+---
+
+## 4. `parsing.service.ts` 변경 — Zod 스키마
+
+### 4.1 현재 dialogue 스키마
+
 ```typescript
-if (this.imageProvider === 'gemini') {
-  ({ buffer: defaultBuffer } = await this.genAI.geminiGenerateImage(defaultPrompt, undefined, '9:16', '1K'));
-  const defaultNobgBuffer = await this.genAI.removeImageBackground(defaultBuffer);
-  await this.s3HelperService.uploadImage(
-    `series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, defaultNobgBuffer, 'image/png',
-  );
+dialogues: z.array(z.object({
+  characterId: z.string(),
+  dialog:      z.string(),
+  action:      z.enum(['IDLE', 'ATTACK', 'SHAKE']),  // ← 삭제
+  emotion:     z.nativeEnum(Emotion),                // ← 삭제
+  look:        z.string(),                           // ← 삭제
+  isEntry:     z.boolean(),                          // ← 삭제
+  isExit:      z.boolean(),                          // ← 삭제
+  position:    z.enum(['left', 'center', 'right']),  // ← 삭제
+}))
+```
+
+### 4.2 변경 후 dialogue 스키마
+
+```typescript
+const currentScreenEntrySchema = z.object({
+  characterId: z.string().describe('화면에 표시된 캐릭터 ID'),
+  position:    z.enum(['left', 'center', 'right']).describe('현재 이 캐릭터의 화면 위치'),
+  emotion:     z.nativeEnum(Emotion).describe('현재 이 캐릭터의 감정'),
+  look:        z.string().describe('현재 이 캐릭터의 외모/표정 (영어)'),
+  action:      z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe('현재 이 캐릭터의 동작'),
+});
+
+dialogues: z.array(z.object({
+  characterId:   z.string(),
+  dialog:        z.string(),
+  // action, emotion, look, isEntry, isExit, position 필드 삭제
+  currentScreen: z.array(currentScreenEntrySchema).describe(
+    '이 대사가 출력되는 순간 화면에 있는 모든 캐릭터 목록 (narrator 제외)',
+  ),
+}))
+```
+
+### 4.3 character_img 플레이스홀더 생성 로직 변경
+
+현재는 `dialogue.emotion`에서 수집. 변경 후에는 `dialogue.emotion` 필드가 삭제되므로 `currentScreen`의 각 항목 `emotion`에서만 수집.
+
+```typescript
+// 변경 전
+emotionMap.get(charId)!.add(dialogue.emotion as Emotion);
+
+// 변경 후 — currentScreen 내 모든 캐릭터 emotion에서만 수집
+for (const scene of resolvedScenes) {
+  for (const dialogue of scene.dialogues) {
+    for (const entry of dialogue.currentScreen ?? []) {
+      if (!emotionMap.has(entry.characterId)) emotionMap.set(entry.characterId, new Set([Emotion.DEFAULT]));
+      emotionMap.get(entry.characterId)!.add(entry.emotion as Emotion);
+    }
+  }
 }
 ```
 
-### 3-2. `generateEmotion` — 감정 이미지
+---
 
-**AS-IS** (line 220–224):
+## 5. `episode.service.ts` 변경 — `buildVnScript`
+
+### 5.1 핵심 변경 로직
+
+기존: `isEntry`/`isExit`/`position`(dialogue 최상위)으로 show/hide 결정  
+변경: `currentScreen` 배열의 포함 여부로 등장/퇴장을 결정 (diff 방식)
+
+각 dialogue 처리 시:
+1. 이전 대사의 `currentScreen`과 현재 대사의 `currentScreen`을 비교
+2. 새로 나타난 캐릭터(혹은 position/emotion이 변경된 캐릭터) → `show character` 명령 추가
+3. 사라진 캐릭터 → `hide character` 명령 추가
+4. 이후 dialogue 또는 narrator 명령 추가
+
+### 5.2 변경 후 `buildVnScript` 구현
+
 ```typescript
-if (this.imageProvider === 'gemini') {
-  ({ buffer } = await this.genAI.geminiGenerateImage(prompt, defaultBuffer, '9:16', '1K'));
-  await this.s3HelperService.uploadImage(
-    `series/${seriesId}/characters/${charId}/${cimg.emotion}_NOBG.png`, buffer, 'image/png',
-  );
+private buildVnScript(
+  scenes: any[],
+  characterMap: VnCharacterMap,
+): (string | Record<string, string>)[] {
+  const script: (string | Record<string, string>)[] = [];
+  let currentBgmId: string | null = null;
+
+  for (const scene of scenes) {
+    if (scene.bgmId && scene.bgmId !== currentBgmId) {
+      script.push(`play bgm ${scene.bgmId}`);
+      currentBgmId = scene.bgmId;
+    }
+    script.push(`show scene ${scene.backgroundId} with fade`);
+
+    // 현재 화면 상태: charId → { position, emotion }
+    let prevScreen = new Map<string, { position: string; emotion: string }>();
+
+    for (const dialogue of scene.dialogues) {
+      const { characterId, dialog, currentScreen } = dialogue;
+
+      // currentScreen 없는 구버전 scenes.json → isEntry/isExit/position 폴백
+      if (!currentScreen) {
+        // 기존 로직 유지 (하위 호환)
+        this.applyLegacyDialogue(dialogue, prevScreen, script, characterMap);
+        continue;
+      }
+
+      // 신규 포맷: currentScreen diff
+      const nextScreen = new Map<string, { position: string; emotion: string }>(
+        currentScreen.map((e: any) => [e.characterId, { position: e.position, emotion: e.emotion }])
+      );
+
+      // 1. 퇴장: prevScreen에 있으나 nextScreen에 없는 캐릭터
+      for (const [charId] of prevScreen) {
+        if (!nextScreen.has(charId)) {
+          script.push(`hide character ${charId}`);
+        }
+      }
+
+      // 2. 등장 or 변경: nextScreen에 있는 캐릭터 중 prevScreen과 다른 경우
+      for (const [charId, { position, emotion }] of nextScreen) {
+        const prev = prevScreen.get(charId);
+        if (!prev || prev.position !== position || prev.emotion !== emotion) {
+          script.push(`show character ${charId} ${emotion} ${position}`);
+        }
+      }
+
+      prevScreen = nextScreen;
+
+      // 3. 대사 또는 나레이션 추가
+      if (characterId === 'narrator' || characterId === 'unknown') {
+        script.push(dialog);
+      } else {
+        const charName = characterMap[characterId]?.name ?? characterId;
+        script.push({ [charName]: dialog });
+      }
+    }
+
+    // 씬 종료 후 화면 잔류 캐릭터 제거
+    for (const charId of prevScreen.keys()) {
+      script.push(`hide character ${charId}`);
+    }
+    prevScreen.clear();
+  }
+
+  script.push('stop bgm');
+  script.push('end');
+  return script;
 }
 ```
 
-**TO-BE**:
-```typescript
-if (this.imageProvider === 'gemini') {
-  ({ buffer } = await this.genAI.geminiGenerateImage(prompt, defaultBuffer, '9:16', '1K'));
-  const nobgBuffer = await this.genAI.removeImageBackground(buffer);
-  await this.s3HelperService.uploadImage(
-    `series/${seriesId}/characters/${charId}/${cimg.emotion}_NOBG.png`, nobgBuffer, 'image/png',
-  );
-}
-```
+### 5.3 하위 호환 처리 (`applyLegacyDialogue`)
+
+기존 소설의 scenes.json(`currentScreen` 없는 구버전)은 기존 `isEntry/isExit/position` 로직으로 처리.
+별도 private 메서드(`applyLegacyDialogue`)로 분리하여 기존 코드 보존.
 
 ---
 
-## 4. 영향 범위
+## 6. 프론트엔드 (`player.js`)
 
-- Leonardo 경로(`this.imageProvider === 'leonardo'`)는 변경 없음. Leonardo는 자체 NOBG API를 통해 처리.
-- 배경 이미지(`generateBackgroundImages`)는 NOBG 저장 자체가 없으므로 영향 없음.
-- Gemini 경로에서 `DEFAULT.png`와 감정 `.png` 저장은 원본 `buffer`를 그대로 사용하므로 변경 없음.
+**변경 없음.** 백엔드 `buildVnScript`가 동일한 `show character` / `hide character` 명령 포맷으로 스크립트를 생성하므로 프론트엔드 플레이어는 현행 그대로 동작한다.
 
 ---
 
-## 5. 예외 처리
+## 7. 작업 순서
 
-- `removeImageBackground` 실패 시 예외를 throw → 상위 `processCharacter` / `generateEmotion`의 기존 catch 블록이 `GenStatus.FAILED`로 처리하므로 별도 추가 핸들링 불필요.
-
----
-
----
-
-## 7. 기존 이미지 NOBG 재처리 API (추가 기능)
-
-### 목적
-
-이미 생성 완료된 캐릭터 이미지들(`status = DONE`)에 대해 `_NOBG.png`를 일괄 재생성.
-Gemini가 체커 무늬로 저장해둔 기존 이미지들을 소급 처리하는 용도.
-
-### 신규 엔드포인트
-
-| Method | Path | Body | 설명 |
-|---|---|---|---|
-| `POST` | `/images/characters/nobg-reprocess` | `{ seriesId }` | 해당 시리즈 전체 캐릭터 이미지 NOBG 재생성 (백그라운드) |
-
-### 처리 흐름
-
-```
-1. CharacterImg JOIN Character WHERE seriesId = ? AND status = DONE 조회
-2. 각 row에 대해 (병렬, Promise.allSettled):
-   a. S3 다운로드: series/{seriesId}/characters/{characterId}/{emotion}.png
-   b. removeImageBackground(buffer) → nobgBuffer
-   c. S3 업로드:  series/{seriesId}/characters/{characterId}/{emotion}_NOBG.png
-3. 성공/실패 수 로깅 후 종료 (부분 실패 허용)
-```
-
-### 변경 파일
-
-| 파일 | 변경 내용 |
-|---|---|
-| `backend/src/image/image.service.ts` | `reprocessNobgForSeries(seriesId)` 메서드 추가 |
-| `backend/src/image/image.controller.ts` | `POST /images/characters/nobg-reprocess` 엔드포인트 추가 |
+1. `prompt.ts` — DIALOGUE RULES 교체
+2. `parsing.service.ts` — Zod 스키마 수정 + 감정 수집 로직 수정
+3. `episode.service.ts` — `buildVnScript` 교체 (레거시 폴백 포함)
+4. 통합 테스트: 새 소설로 파이프라인 End-to-End 실행 확인
 
 ---
 
-## 6. 구현 체크리스트
+## 8. 체크리스트
 
-- [x] `@imgly/background-removal-node` 패키지 설치
-- [x] `GenAIHelperService.removeImageBackground` 메서드 추가
-- [x] `processCharacter` DEFAULT NOBG 저장 로직 수정
-- [x] `generateEmotion` NOBG 저장 로직 수정
-- [x] `ImageService.reprocessNobgForSeries` 메서드 추가
-- [x] `POST /images/characters/nobg-reprocess` 엔드포인트 추가
-- [ ] 로컬 테스트: Gemini 모드로 캐릭터 이미지 생성 후 S3 `_NOBG.png` 알파 채널 확인
-- [ ] 로컬 테스트: 기존 시리즈에 `nobg-reprocess` 호출 후 S3 확인
+- [ ] `currentScreen`이 없는 구버전 scenes.json(isEntry/isExit/position 포맷)에서 플레이어 정상 동작 확인
+- [ ] narrator 대사 시 화면 캐릭터 유지 확인
+- [ ] 2인 → 3인 진입 시 위치 재배치 확인
+- [ ] 집단 캐릭터 진입 시 기존 캐릭터 전원 퇴장 확인
+- [ ] character_img 플레이스홀더에 currentScreen 감정 포함 확인

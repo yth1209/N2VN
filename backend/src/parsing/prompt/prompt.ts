@@ -44,16 +44,30 @@ Then reference them by tempId in the scenes array.
 - BGM prompt must be in English, under 30 words (e.g., "calm piano melody with soft strings, peaceful ambient").
 
 [DIALOGUE RULES]
+
+# 1. Text & Metadata Rules
 - Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field. Do NOT translate.
 - characterId: match the speaker to their ID using characters_info. Use "narrator" for narration, "unknown" for unidentified characters.
-- For narrator blocks: EXCLUDE purely visual descriptions or emotional expositions. ONLY keep essential plot advancements. Summarize and compress. Avoid consecutive narrator blocks.
-- Provide "emotion", "look" ONLY in English.
-- The "action" field MUST ONLY be one of: ["IDLE", "ATTACK", "SHAKE"].
-- isEntry: true on the FIRST line of a character within a scene. narrator always false.
-- isExit: true on the LAST line of a character within a scene. narrator always false.
-- A character appearing only once in a scene has both isEntry and isExit as true.
-- position: "center" if alone on screen; "left" or "right" for 2+ characters. (Note: Narrator is always "center" and excluded from the character count).
-- position Exception: If a single character image represents a group of multiple people (e.g., a crowd or mob), it must be positioned "center" alone, and all other characters must be cleared from the screen.
+- Narrator Blocks: EXCLUDE purely visual descriptions or emotional expositions. ONLY keep essential plot advancements. Summarize and compress. Avoid consecutive narrator blocks.
+
+# 2. Screen State & Positioning Rules (CRITICAL)
+- "currentScreen" Field: Every dialogue block MUST include a "currentScreen" array detailing ONLY the visible characters on screen during that turn. Do NOT use entry/exit flags. The presence or absence of a character in this array dictates their entry or exit.
+- Narrator Exclusion: The narrator is EXCLUDED from the "currentScreen" array.
+
+# 3. Dynamic Layout Adjustment (Inside "currentScreen")
+- Each currentScreen entry contains: characterId, position, emotion, look, action — for that character AT THIS MOMENT.
+- emotion / look: Provide ONLY in English.
+- action: MUST ONLY be one of: ["IDLE", "ATTACK", "SHAKE"].
+- 1 Character: MUST be "center".
+- 2 Characters: MUST be "left" and "right". (If a 2nd character joins a single character, the existing character must be moved to "left" or "right").
+- 3 Characters: MUST be "left", "center", and "right".
+- Overcrowding Prevention: MAX 3 characters. If a 4th must appear, REMOVE the least active character from the "currentScreen" array to make room.
+
+# 4. Group Character Monopoly Exception
+- If a character represents a group (e.g., crowd, mob, gang):
+  * They MUST be alone on screen.
+  * ALL other characters MUST be completely removed from the "currentScreen" array in that turn.
+  * The group character's position MUST be "center".
 
 
 Known Characters Information:

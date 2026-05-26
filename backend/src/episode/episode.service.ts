@@ -189,53 +189,91 @@ export class EpisodeService {
     let currentBgmId: string | null = null;
 
     for (const scene of scenes) {
-      // bgmId가 변경된 경우에만 play bgm 명령 삽입
       if (scene.bgmId && scene.bgmId !== currentBgmId) {
         script.push(`play bgm ${scene.bgmId}`);
         currentBgmId = scene.bgmId;
       }
       script.push(`show scene ${scene.backgroundId} with fade`);
-      const onScreen = new Map<string, { emotion: string; position: string }>();
+
+      let prevScreen = new Map<string, { position: string; emotion: string }>();
 
       for (const dialogue of scene.dialogues) {
-        const { characterId, dialog, emotion, isEntry, isExit, position } = dialogue;
-        const entry = isEntry  ?? false;
-        const exit  = isExit   ?? false;
-        const pos   = position ?? 'center';
-        const emo   = emotion  ?? Emotion.DEFAULT;
+        const { characterId, dialog, currentScreen } = dialogue;
 
-        if (characterId === 'narrator' || characterId === 'unknown') {
-          script.push(dialog);
+        if (!currentScreen) {
+          this.applyLegacyDialogue(dialogue, prevScreen, script, characterMap);
           continue;
         }
 
-        const charName = characterMap[characterId]?.name ?? characterId;
+        const nextScreen = new Map<string, { position: string; emotion: string }>(
+          currentScreen.map((e: any) => [e.characterId, { position: e.position, emotion: e.emotion }]),
+        );
 
-        if (entry && !onScreen.has(characterId)) {
-          script.push(`show character ${characterId} ${emo} ${pos}`);
-          onScreen.set(characterId, { emotion: emo, position: pos });
-        } else if (onScreen.has(characterId)) {
-          const prev = onScreen.get(characterId)!;
-          if (prev.emotion !== emo || prev.position !== pos) {
-            script.push(`show character ${characterId} ${emo} ${pos}`);
-            onScreen.set(characterId, { emotion: emo, position: pos });
+        for (const [charId] of prevScreen) {
+          if (!nextScreen.has(charId)) script.push(`hide character ${charId}`);
+        }
+
+        for (const [charId, { position, emotion }] of nextScreen) {
+          const prev = prevScreen.get(charId);
+          if (!prev || prev.position !== position || prev.emotion !== emotion) {
+            script.push(`show character ${charId} ${emotion} ${position}`);
           }
         }
 
-        script.push({ [charName]: dialog });
+        prevScreen = nextScreen;
 
-        if (exit) {
-          script.push(`hide character ${characterId}`);
-          onScreen.delete(characterId);
+        if (characterId === 'narrator' || characterId === 'unknown') {
+          script.push(dialog);
+        } else {
+          const charName = characterMap[characterId]?.name ?? characterId;
+          script.push({ [charName]: dialog });
         }
       }
 
-      for (const charId of onScreen.keys()) script.push(`hide character ${charId}`);
-      onScreen.clear();
+      for (const charId of prevScreen.keys()) script.push(`hide character ${charId}`);
+      prevScreen.clear();
     }
 
     script.push('stop bgm');
     script.push('end');
     return script;
+  }
+
+  private applyLegacyDialogue(
+    dialogue: any,
+    prevScreen: Map<string, { position: string; emotion: string }>,
+    script: (string | Record<string, string>)[],
+    characterMap: VnCharacterMap,
+  ): void {
+    const { characterId, dialog, emotion, isEntry, isExit, position } = dialogue;
+    const entry = isEntry  ?? false;
+    const exit  = isExit   ?? false;
+    const pos   = position ?? 'center';
+    const emo   = emotion  ?? Emotion.DEFAULT;
+
+    if (characterId === 'narrator' || characterId === 'unknown') {
+      script.push(dialog);
+      return;
+    }
+
+    const charName = characterMap[characterId]?.name ?? characterId;
+
+    if (entry && !prevScreen.has(characterId)) {
+      script.push(`show character ${characterId} ${emo} ${pos}`);
+      prevScreen.set(characterId, { emotion: emo, position: pos });
+    } else if (prevScreen.has(characterId)) {
+      const prev = prevScreen.get(characterId)!;
+      if (prev.emotion !== emo || prev.position !== pos) {
+        script.push(`show character ${characterId} ${emo} ${pos}`);
+        prevScreen.set(characterId, { emotion: emo, position: pos });
+      }
+    }
+
+    script.push({ [charName]: dialog });
+
+    if (exit) {
+      script.push(`hide character ${characterId}`);
+      prevScreen.delete(characterId);
+    }
   }
 }
