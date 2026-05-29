@@ -73,11 +73,11 @@
       align-items: flex-end;
       justify-content: space-around;
       pointer-events: none;
-      overflow: hidden;
     }
 
     .char-slot {
       flex: 1;
+      min-width: 0;
       display: flex;
       align-items: flex-end;
       justify-content: center;
@@ -85,21 +85,16 @@
     }
 
     .char-slot img {
-      --tx: 0%;
       height: 85vh;
       width: auto;
       max-height: 95vh;
       object-position: bottom;
-      transform: translateX(var(--tx));
       transition: filter 0.35s ease, transform 0.35s ease;
     }
 
-    #char-left  img { --tx: -15%; }
-    #char-right img { --tx:  15%; }
-
     .char-slot img.speaking {
       filter: brightness(1.0);
-      transform: translateX(var(--tx)) scale(1.02) translateY(-4px);
+      transform: scale(1.02) translateY(-4px);
     }
     .char-slot img.silent {
       filter: brightness(0.5) saturate(0.6);
