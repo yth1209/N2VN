@@ -57,16 +57,18 @@ export class ImageService {
       `[${series.id}] 캐릭터 이미지 생성 시작: ${charGroups.size}명, 총 ${pendingImages.length}개 감정`,
     );
 
-    const characterPromises = Array.from(charGroups.values()).map((pis) =>
-      this.processCharacter(series.id, pis, globalArtStyle, selectedStyleUUID).catch((err) =>
-        {
-          this.logger.error(`[${pis[0].characterId}] 처리 실패: ${err.message}`)
-          throw err
-        }
-      ),
-    );
+    if (this.imageProvider === 'gemini') {
+      await this.generateCharacterImagesBatch(series.id, charGroups, globalArtStyle);
+    } else {
+      const characterPromises = Array.from(charGroups.values()).map((pis) =>
+        this.processCharacter(series.id, pis, globalArtStyle, selectedStyleUUID).catch((err) => {
+          this.logger.error(`[${pis[0].characterId}] 처리 실패: ${err.message}`);
+          throw err;
+        }),
+      );
+      await Promise.all(characterPromises);
+    }
 
-    await Promise.all(characterPromises);
     this.logger.log(`[${series.id}] 모든 캐릭터 이미지 생성 완료`);
   }
 
@@ -98,40 +100,158 @@ export class ImageService {
 
     this.logger.log(`[${seriesId}] 신규 배경 이미지 생성: ${backgrounds.length}개`);
 
-    await Promise.all(
-      backgrounds.map(async (bg) => {
+    if (this.imageProvider === 'gemini') {
+      for (const bg of backgrounds) {
         bg.status = GenStatus.PROCESSING;
         await this.repo.background.save(bg);
+      }
 
-        try {
-          const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
-          let buffer: Buffer;
+      const bgRequests = backgrounds.map((bg) => ({
+        prompt:      `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`,
+        metadata:    { bgId: bg.id },
+        aspectRatio: '16:9',
+        imageSize:   '2K',
+      }));
+      const bgResults = await this.genAI.geminiBatchGenerateImages(bgRequests);
 
-          if (this.imageProvider === 'gemini') {
-            ({ buffer } = await this.genAI.geminiGenerateImage(prompt, undefined, '16:9', '2K'));
-          } else {
-            const result = await this.genAI.leonardoGenerateImage(
-              prompt, undefined, selectedStyleUUID, 1280, 720,
-            );
-            buffer = result.buffer;
-            bg.genId = result.imageId;
-          }
+      for (let i = 0; i < bgResults.length; i++) {
+        const result = bgResults[i];
+        const bg     = backgrounds[i];
 
-          await this.s3HelperService.uploadImage(
-            `series/${seriesId}/backgrounds/${bg.id}.png`, buffer, 'image/png',
-          );
-          bg.status = GenStatus.DONE;
-          await this.repo.background.save(bg);
-          this.logger.log(`[${bg.id}] 배경 이미지 완료`);
-        } catch (err: any) {
+        if (result.error) {
           bg.status = GenStatus.FAILED;
           await this.repo.background.save(bg);
-          this.logger.error(`[${bg.id}] 배경 이미지 실패: ${err.message}`);
+          this.logger.error(`[${bg.id}] 배경 배치 생성 실패: ${result.error.message}`);
+          continue;
         }
+
+        await this.s3HelperService.uploadImage(`series/${seriesId}/backgrounds/${bg.id}.png`, result.buffer!, 'image/png');
+        bg.status = GenStatus.DONE;
+        await this.repo.background.save(bg);
+        this.logger.log(`[${bg.id}] 배경 이미지 완료`);
+      }
+    } else {
+      await Promise.all(
+        backgrounds.map(async (bg) => {
+          bg.status = GenStatus.PROCESSING;
+          await this.repo.background.save(bg);
+
+          try {
+            const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
+            const result = await this.genAI.leonardoGenerateImage(prompt, undefined, selectedStyleUUID, 1280, 720);
+            await this.s3HelperService.uploadImage(`series/${seriesId}/backgrounds/${bg.id}.png`, result.buffer, 'image/png');
+            bg.genId  = result.imageId;
+            bg.status = GenStatus.DONE;
+            await this.repo.background.save(bg);
+            this.logger.log(`[${bg.id}] 배경 이미지 완료`);
+          } catch (err: any) {
+            bg.status = GenStatus.FAILED;
+            await this.repo.background.save(bg);
+            this.logger.error(`[${bg.id}] 배경 이미지 실패: ${err.message}`);
+          }
+        }),
+      );
+    }
+
+    this.logger.log(`[${seriesId}] 배경 이미지 생성 완료`);
+  }
+
+  private async generateCharacterImagesBatch(
+    seriesId: string,
+    charGroups: Map<string, CharacterImg[]>,
+    globalArtStyle: string,
+  ): Promise<void> {
+    const defaultBufferMap = new Map<string, Buffer>();
+
+    // ── Phase 1: DEFAULT 배치 ────────────────────────────────────────────────
+    const charsNeedingDefault = [...charGroups.entries()].filter(([, pis]) =>
+      pis.some((pi) => pi.emotion === Emotion.DEFAULT),
+    );
+
+    if (charsNeedingDefault.length > 0) {
+      for (const [, pis] of charsNeedingDefault) {
+        const defaultImg = pis.find((pi) => pi.emotion === Emotion.DEFAULT)!;
+        defaultImg.status = GenStatus.PROCESSING;
+        await this.repo.characterImg.save(defaultImg);
+      }
+
+      const defaultRequests = charsNeedingDefault.map(([charId, pis]) => ({
+        prompt:      getCharacterPrompt(globalArtStyle, pis[0]._characterFk.look, Emotion.DEFAULT, pis[0]._characterFk.subjectCount ?? 1),
+        metadata:    { charId },
+        aspectRatio: '9:16',
+        imageSize:   '1K',
+      }));
+      const defaultResults = await this.genAI.geminiBatchGenerateImages(defaultRequests);
+
+      for (let i = 0; i < defaultResults.length; i++) {
+        const result     = defaultResults[i];
+        const charId     = result.metadata!.charId;
+        const defaultImg = charsNeedingDefault[i][1].find((pi) => pi.emotion === Emotion.DEFAULT)!;
+
+        if (result.error) {
+          defaultImg.status = GenStatus.FAILED;
+          await this.repo.characterImg.save(defaultImg);
+          this.logger.error(`[${charId}] DEFAULT 배치 생성 실패: ${result.error.message}`);
+          continue;
+        }
+
+        const nobgBuffer = await this.genAI.removeImageBackground(result.buffer!);
+        await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${charId}/DEFAULT.png`, result.buffer!, 'image/png');
+        await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, nobgBuffer, 'image/png');
+        defaultImg.status = GenStatus.DONE;
+        await this.repo.characterImg.save(defaultImg);
+        defaultBufferMap.set(charId, result.buffer!);
+        this.logger.log(`[${charId}] DEFAULT 배치 생성 완료`);
+      }
+    }
+
+    // DEFAULT가 이미 DONE인 캐릭터는 S3에서 다운로드
+    const charsNeedingS3 = [...charGroups.keys()].filter((charId) => !defaultBufferMap.has(charId));
+    await Promise.all(
+      charsNeedingS3.map(async (charId) => {
+        const buf = await this.s3HelperService.downloadImage(
+          `series/${seriesId}/characters/${charId}/DEFAULT.png`,
+        );
+        defaultBufferMap.set(charId, buf);
       }),
     );
 
-    this.logger.log(`[${seriesId}] 배경 이미지 생성 완료`);
+    // ── Phase 2: 감정 배치 ───────────────────────────────────────────────────
+    const pendingEmotions = [...charGroups.values()].flat().filter((pi) => pi.emotion !== Emotion.DEFAULT);
+    if (pendingEmotions.length === 0) return;
+
+    for (const cimg of pendingEmotions) {
+      cimg.status = GenStatus.PROCESSING;
+      await this.repo.characterImg.save(cimg);
+    }
+
+    const emotionRequests = pendingEmotions.map((cimg) => ({
+      prompt:          getCharacterEmotionPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion, 'gemini', cimg._characterFk.subjectCount ?? 1),
+      initImageBuffer: defaultBufferMap.get(cimg.characterId),
+      metadata:        { charId: cimg.characterId, emotion: cimg.emotion },
+      aspectRatio:     '9:16',
+      imageSize:       '1K',
+    }));
+    const emotionResults = await this.genAI.geminiBatchGenerateImages(emotionRequests);
+
+    for (let i = 0; i < emotionResults.length; i++) {
+      const result = emotionResults[i];
+      const cimg   = pendingEmotions[i];
+
+      if (result.error) {
+        cimg.status = GenStatus.FAILED;
+        await this.repo.characterImg.save(cimg);
+        this.logger.error(`[${cimg.characterId}] ${cimg.emotion} 배치 생성 실패: ${result.error.message}`);
+        continue;
+      }
+
+      const nobgBuffer = await this.genAI.removeImageBackground(result.buffer!);
+      await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}.png`, result.buffer!, 'image/png');
+      await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`, nobgBuffer, 'image/png');
+      cimg.status = GenStatus.DONE;
+      await this.repo.characterImg.save(cimg);
+      this.logger.log(`[${cimg.characterId}] ${cimg.emotion} 배치 생성 완료`);
+    }
   }
 
   private async processCharacter(
@@ -149,7 +269,7 @@ export class ImageService {
 
     if ([GenStatus.PENDING, GenStatus.FAILED].includes(defaultImg.status)) {
       this.logger.log(`[${charId}] DEFAULT 이미지 생성 중...`);
-      const defaultPrompt = getCharacterPrompt(globalArtStyle, charInfo.look, Emotion.DEFAULT, this.imageProvider);
+      const defaultPrompt = getCharacterPrompt(globalArtStyle, charInfo.look, Emotion.DEFAULT, charInfo.subjectCount ?? 1);
 
       defaultImg.status = GenStatus.PROCESSING;
       await this.repo.characterImg.save(defaultImg);
@@ -210,7 +330,7 @@ export class ImageService {
     defaultBuffer?: Buffer,  // Gemini: DEFAULT 이미지 bytes
   ): Promise<void> {
     const charId = cimg.characterId;
-    const prompt = getCharacterEmotionPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion, this.imageProvider);
+    const prompt = getCharacterEmotionPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion, this.imageProvider, cimg._characterFk.subjectCount ?? 1);
 
     cimg.status = GenStatus.PROCESSING;
     await this.repo.characterImg.save(cimg);

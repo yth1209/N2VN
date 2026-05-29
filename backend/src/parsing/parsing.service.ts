@@ -51,8 +51,9 @@ export class ParsingService {
       characters: z.record(
         z.string().describe('등장인물의 원본 이름 (번역 금지, 원문 그대로)'),
         z.object({
-          sex:  z.string().describe('성별 (male, female, unknown)'),
-          look: z.string().describe('캐릭터 비주얼 Character Bible 프롬프트 (영어 키워드)'),
+          sex:          z.string().describe('성별 (male, female, unknown)'),
+          look:         z.string().describe('캐릭터 비주얼 Character Bible 프롬프트 (영어 키워드)'),
+          subjectCount: z.number().int().min(1).max(3).describe('이 캐릭터 엔트리가 나타내는 실제 인원 수 (단일 = 1, 그룹 = 2~3)'),
         }),
       ),
     });
@@ -72,7 +73,7 @@ export class ParsingService {
     }
 
     const newCharacters = Object.entries(result.characters).map(([name, attr]: [string, any]) => {
-      return this.repo.character.create({ seriesId: series.id, name, sex: attr.sex, look: attr.look });
+      return this.repo.character.create({ seriesId: series.id, name, sex: attr.sex, look: attr.look, subjectCount: attr.subjectCount ?? 1 });
     });
 
     if (newCharacters.length > 0) {

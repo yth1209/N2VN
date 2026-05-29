@@ -1,280 +1,307 @@
-# development.md — 씬 내 캐릭터 화면 배치 개편
+# Development Plan: Gemini Image Generation 배치 요청 전환
 
-> plan.md 기반 개발 상세 기획서.
-> 아키텍처/스키마 배경지식은 structure.md 참조.
+## 1. AS-IS 비용 구조 분석
 
----
+### 현재 Gemini 이미지 생성 호출 패턴
 
-## 1. 변경 범위 요약
-
-| 파일 | 변경 유형 | 내용 |
-|---|---|---|
-| `backend/src/parsing/prompt/prompt.ts` | 수정 | scene_prompt DIALOGUE RULES 교체 |
-| `backend/src/parsing/parsing.service.ts` | 수정 | Zod 스키마 — `position`, `isEntry`, `isExit` 제거, `currentScreen[]` 추가 |
-| `backend/src/episode/episode.service.ts` | 수정 | `buildVnScript` 로직 전면 교체 (currentScreen diff 기반) |
-| `frontend/player.js` | 변경 없음 | 스크립트 포맷이 동일하게 유지되므로 수정 불필요 |
-
-> **기존 소설 영향 없음:** `buildVnScript`에서 `??` 기본값 처리로 구버전 scenes.json도 계속 동작.
-
----
-
-## 2. scenes.json 포맷 변경
-
-### 2.1 AS-IS (dialogue 구조)
-
-```json
-{
-  "characterId": "1_char_1",
-  "dialog": "에이, 선생님도 참.",
-  "action": "IDLE",
-  "emotion": "SMILE",
-  "look": "cheerful smile",
-  "isEntry": false,
-  "isExit": false,
-  "position": "right"
+```typescript
+// gen-ai-helper.service.ts
+async geminiGenerateImage(prompt, initImageBuffer?, aspectRatio?, imageSize?) {
+  await this.geminiImageAI.models.generateContent({ ... }); // 1회 = 이미지 1장
 }
 ```
 
-### 2.2 TO-BE (dialogue 구조)
+**캐릭터 5명 × 감정 10개 + 배경 10개 기준:**
 
-```json
-{
-  "characterId": "1_char_1",
-  "dialog": "에이, 선생님도 참.",
-  "currentScreen": [
-    {
-      "characterId": "1_char_1",
-      "position": "left",
-      "emotion": "SMILE",
-      "look": "cheerful smile",
-      "action": "IDLE"
-    },
-    {
-      "characterId": "helmet-gang-id",
-      "position": "right",
-      "emotion": "ANGRY",
-      "look": "holding weapons",
-      "action": "SHAKE"
-    }
-  ]
-}
+```
+DEFAULT 생성:  generateContent() × 5   (캐릭터당 1회)
+감정 생성:     generateContent() × 45  (캐릭터당 9회 × 5명)
+배경 생성:     generateContent() × 10
+
+합계: generateContent() 60회 개별 호출
 ```
 
-**변경 포인트:**
-- `action` / `emotion` / `look` 필드 삭제 (dialogue 최상위에서 제거) — 해당 정보는 `currentScreen` 내 캐릭터 항목에 포함
-- `position` 필드 삭제 (dialogue 최상위에서 제거)
-- `isEntry` / `isExit` 필드 삭제 — 등장/퇴장 여부는 `currentScreen`의 포함 여부로 결정
-- `currentScreen` 배열 추가 — 해당 대사가 출력되는 순간 화면에 있는 **모든** 캐릭터 목록 (action/emotion/look/position 포함)
-- narrator의 경우 `currentScreen`은 현재 화면 상태를 그대로 유지 (narration 중에도 화면 구성은 존재)
+각 호출이 독립적인 HTTP 요청이므로 연결 오버헤드가 60배 발생하고, API 요금 체계상 개별 호출보다 배치 제출이 비용 효율적이다.
 
 ---
 
-## 3. `parsing/prompt/prompt.ts` 변경
+## 2. TO-BE 설계
 
-`scene_prompt` 내 `[DIALOGUE RULES]` 블록을 아래로 교체한다.
+### 2.1 Gemini Batch API 구조
 
-```
-[DIALOGUE RULES]
-
-# 1. Text & Metadata Rules
-- Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field. Do NOT translate.
-- characterId: match the speaker to their ID using characters_info. Use "narrator" for narration, "unknown" for unidentified characters.
-- Narrator Blocks: EXCLUDE purely visual descriptions or emotional expositions. ONLY keep essential plot advancements. Summarize and compress. Avoid consecutive narrator blocks.
-
-# 2. Screen State & Positioning Rules (CRITICAL)
-- "currentScreen" Field: Every dialogue block MUST include a "currentScreen" array detailing ONLY the visible characters on screen during that turn. Do NOT use entry/exit flags. The presence or absence of a character in this array dictates their entry or exit.
-- Narrator Exclusion: The narrator is EXCLUDED from the "currentScreen" array.
-
-# 3. Dynamic Layout Adjustment (Inside "currentScreen")
-- Each currentScreen entry contains: characterId, position, emotion, look, action — for that character AT THIS MOMENT.
-- emotion / look: Provide ONLY in English.
-- action: MUST ONLY be one of: ["IDLE", "ATTACK", "SHAKE"].
-- 1 Character: MUST be "center".
-- 2 Characters: MUST be "left" and "right". (If a 2nd character joins a single character, the existing character must be moved to "left" or "right").
-- 3 Characters: MUST be "left", "center", and "right".
-- Overcrowding Prevention: MAX 3 characters. If a 4th must appear, REMOVE the least active character from the "currentScreen" array to make room.
-
-# 4. Group Character Monopoly Exception
-- If a character represents a group (e.g., crowd, mob, gang):
-  * They MUST be alone on screen.
-  * ALL other characters MUST be completely removed from the "currentScreen" array in that turn.
-  * The group character's position MUST be "center".
-```
-
----
-
-## 4. `parsing.service.ts` 변경 — Zod 스키마
-
-### 4.1 현재 dialogue 스키마
+`@google/genai` v2.6.0에서 `batches` 모듈이 제공된다.
 
 ```typescript
-dialogues: z.array(z.object({
-  characterId: z.string(),
-  dialog:      z.string(),
-  action:      z.enum(['IDLE', 'ATTACK', 'SHAKE']),  // ← 삭제
-  emotion:     z.nativeEnum(Emotion),                // ← 삭제
-  look:        z.string(),                           // ← 삭제
-  isEntry:     z.boolean(),                          // ← 삭제
-  isExit:      z.boolean(),                          // ← 삭제
-  position:    z.enum(['left', 'center', 'right']),  // ← 삭제
-}))
-```
-
-### 4.2 변경 후 dialogue 스키마
-
-```typescript
-const currentScreenEntrySchema = z.object({
-  characterId: z.string().describe('화면에 표시된 캐릭터 ID'),
-  position:    z.enum(['left', 'center', 'right']).describe('현재 이 캐릭터의 화면 위치'),
-  emotion:     z.nativeEnum(Emotion).describe('현재 이 캐릭터의 감정'),
-  look:        z.string().describe('현재 이 캐릭터의 외모/표정 (영어)'),
-  action:      z.enum(['IDLE', 'ATTACK', 'SHAKE']).describe('현재 이 캐릭터의 동작'),
+// 요청 제출
+const job: BatchJob = await ai.batches.create({
+  model: 'gemini-3-pro-image-preview',
+  src: InlinedRequest[],   // 여러 요청을 배열로 한 번에 제출
 });
 
-dialogues: z.array(z.object({
-  characterId:   z.string(),
-  dialog:        z.string(),
-  // action, emotion, look, isEntry, isExit, position 필드 삭제
-  currentScreen: z.array(currentScreenEntrySchema).describe(
-    '이 대사가 출력되는 순간 화면에 있는 모든 캐릭터 목록 (narrator 제외)',
-  ),
-}))
+// 완료 폴링
+const done = await ai.batches.get({ name: job.name });
+// done.state === 'JOB_STATE_SUCCEEDED'
+
+// 결과 추출
+const responses: InlinedResponse[] = done.dest.inlinedResponses;
+// responses[i].response → GenerateContentResponse (이미지 포함)
+// responses[i].error    → 실패한 경우
 ```
 
-### 4.3 character_img 플레이스홀더 생성 로직 변경
+**핵심 타입:**
+```typescript
+interface InlinedRequest {
+  model?:    string;
+  contents?: ContentListUnion;  // 프롬프트 텍스트 + initImage (optional)
+  config?:   GenerateContentConfig;
+}
 
-현재는 `dialogue.emotion`에서 수집. 변경 후에는 `dialogue.emotion` 필드가 삭제되므로 `currentScreen`의 각 항목 `emotion`에서만 수집.
+class InlinedResponse {
+  response?: GenerateContentResponse; // 이미지 데이터 포함
+  error?:    JobError;
+}
+```
+
+### 2.2 배치 처리 단계 설계
+
+캐릭터 감정 이미지는 DEFAULT 이미지(initImageBuffer)를 레퍼런스로 사용하므로, **2단계 배치**로 나눈다.
+
+```
+Phase 1 — DEFAULT 배치
+  InlinedRequest[] = [ charA_DEFAULT, charB_DEFAULT, charC_DEFAULT, ... ]
+  batches.create() → 폴링 → 완료
+  → defaultBuffers Map<charId, Buffer> 구성
+
+Phase 2 — 감정 + 배경 배치 (동시)
+  charEmotionRequests[]   = [ (charA, SMILE, defaultBuffer_A), ... ]  각 요청에 initImage 포함
+  bgRequests[]            = [ bg_1, bg_2, ... ]
+
+  Promise.all([
+    batches.create(charEmotionRequests),   // 감정 이미지 배치
+    batches.create(bgRequests),            // 배경 이미지 배치
+  ]) → 각각 폴링 → 완료
+```
+
+---
+
+## 3. 구현 계획
+
+### 3.1 `gen-ai-helper.service.ts` — 신규 메서드 추가
 
 ```typescript
-// 변경 전
-emotionMap.get(charId)!.add(dialogue.emotion as Emotion);
+async geminiBatchGenerateImages(
+  requests: Array<{
+    prompt:           string;
+    initImageBuffer?: Buffer;
+    aspectRatio?:     string;
+    imageSize?:       string;
+    metadata?:        Record<string, string>;  // 결과 매핑용 식별자
+  }>,
+): Promise<Array<{ buffer: Buffer; metadata?: Record<string, string> }>>
+```
 
-// 변경 후 — currentScreen 내 모든 캐릭터 emotion에서만 수집
-for (const scene of resolvedScenes) {
-  for (const dialogue of scene.dialogues) {
-    for (const entry of dialogue.currentScreen ?? []) {
-      if (!emotionMap.has(entry.characterId)) emotionMap.set(entry.characterId, new Set([Emotion.DEFAULT]));
-      emotionMap.get(entry.characterId)!.add(entry.emotion as Emotion);
+**내부 구현:**
+
+1. `requests`를 `InlinedRequest[]`로 변환
+   - `contents`: `[{ text: prompt }]` + initImageBuffer가 있으면 `inlineData` 추가
+   - `config`: `{ responseModalities: ['IMAGE', 'TEXT'], responseFormat: { image: { aspectRatio, imageSize } } }`
+
+2. `this.geminiImageAI.batches.create({ model: this.geminiImageModel, src: inlinedRequests })` 호출
+   → `BatchJob` 핸들만 즉시 반환 (결과 아님)
+
+3. **배치 전용 폴링** — `batches.get({ name })` 반복 호출, `state === JOB_STATE_SUCCEEDED` 대기
+   - `batches.create()`는 일반 `generateContent()`와 달리 `await`으로 결과가 바로 오지 않음
+   - 기존 `poll()`(최대 180s)은 사용 불가 — Batch API 공식 문서 기준 최대 24시간 소요 가능
+   - 배치 전용 폴링: interval 30s, 최대 대기 시간 별도 설정(예: 2시간) 권장
+
+4. `job.dest.inlinedResponses` 순회 → 각 항목의 `response.candidates[0].content.parts`에서 `inlineData` 추출 → Buffer 변환, `error` 유무도 함께 반환
+
+5. 입력 순서와 동일한 순서로 `{ buffer?, error?, metadata? }[]` 반환
+
+### 3.2 `image.service.ts` — `generateCharacterImages()` 리팩터링
+
+> **Phase 2-B(배경 이미지)는 별도 API**(`POST /images/backgrounds` → `generateBackgroundImages()`)에서 처리한다.
+> `generateCharacterImages()`는 캐릭터 이미지만 담당하며, 배경 배치는 아래 3.3절에서 독립적으로 기술한다.
+
+**변경 전:**
+```
+캐릭터별 processCharacter() 병렬 실행
+  → DEFAULT generateContent() → NOBG → 업로드
+  → 감정별 generateContent() 병렬 → NOBG → 업로드
+```
+
+**변경 후 (Gemini 경로 한정):**
+```typescript
+const defaultBufferMap = new Map<string, Buffer>();
+
+// ── Phase 1: DEFAULT 배치 ─────────────────────────────────────────────────
+// DEFAULT가 이미 DONE인 캐릭터는 pendingImages 쿼리에서 걸러지므로
+// charGroups에 DEFAULT 엔트리가 없다 → 재생성하면 안 됨
+const charsNeedingDefault = [...charGroups.entries()]
+  .filter(([, pis]) => pis.some(pi => pi.emotion === Emotion.DEFAULT));
+
+if (charsNeedingDefault.length > 0) {
+  // 배치 제출 전: 대상 전체를 PROCESSING으로 마킹
+  for (const [, pis] of charsNeedingDefault) {
+    const defaultImg = pis.find(pi => pi.emotion === Emotion.DEFAULT);
+    defaultImg.status = GenStatus.PROCESSING;
+    await this.repo.characterImg.save(defaultImg);
+  }
+
+  const defaultRequests = charsNeedingDefault.map(([charId, pis]) => ({
+    prompt:      getCharacterPrompt(globalArtStyle, pis[0]._characterFk.look, Emotion.DEFAULT, 'gemini'),
+    metadata:    { charId },
+    aspectRatio: '9:16', imageSize: '1K',
+  }));
+  const defaultResults = await this.genAI.geminiBatchGenerateImages(defaultRequests);
+
+  for (let i = 0; i < defaultResults.length; i++) {
+    const result = defaultResults[i];
+    const charId = result.metadata!.charId;
+    const defaultImg = charsNeedingDefault[i][1].find(pi => pi.emotion === Emotion.DEFAULT);
+
+    if (result.error) {
+      // 배치 내 개별 항목 실패
+      defaultImg.status = GenStatus.FAILED;
+      await this.repo.characterImg.save(defaultImg);
+      this.logger.error(`[${charId}] DEFAULT 배치 생성 실패: ${result.error.message}`);
+      continue;
     }
+
+    const nobgBuffer = await this.genAI.removeImageBackground(result.buffer);
+    await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${charId}/DEFAULT.png`, result.buffer, 'image/png');
+    await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, nobgBuffer, 'image/png');
+    defaultImg.status = GenStatus.DONE;
+    await this.repo.characterImg.save(defaultImg);
+    defaultBufferMap.set(charId, result.buffer);
+  }
+}
+
+// DEFAULT가 이미 DONE인 캐릭터는 S3에서 다운로드하여 defaultBufferMap 채우기
+const charsNeedingS3Download = [...charGroups.keys()]
+  .filter(charId => !defaultBufferMap.has(charId));
+
+await Promise.all(
+  charsNeedingS3Download.map(async (charId) => {
+    const buf = await this.s3HelperService.downloadImage(
+      `series/${seriesId}/characters/${charId}/DEFAULT.png`,
+    );
+    defaultBufferMap.set(charId, buf);
+  }),
+);
+
+// ── Phase 2: 감정 배치 ────────────────────────────────────────────────────
+const pendingEmotions = [...charGroups.values()]
+  .flat()
+  .filter(pi => pi.emotion !== Emotion.DEFAULT);
+
+if (pendingEmotions.length > 0) {
+  // 배치 제출 전: 대상 전체를 PROCESSING으로 마킹
+  for (const cimg of pendingEmotions) {
+    cimg.status = GenStatus.PROCESSING;
+    await this.repo.characterImg.save(cimg);
+  }
+
+  const emotionRequests = pendingEmotions.map(cimg => ({
+    prompt:          getCharacterEmotionPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion, 'gemini'),
+    initImageBuffer: defaultBufferMap.get(cimg.characterId),
+    metadata:        { charId: cimg.characterId, emotion: cimg.emotion },
+    aspectRatio: '9:16', imageSize: '1K',
+  }));
+  const emotionResults = await this.genAI.geminiBatchGenerateImages(emotionRequests);
+
+  for (let i = 0; i < emotionResults.length; i++) {
+    const result = emotionResults[i];
+    const cimg = pendingEmotions[i];
+
+    if (result.error) {
+      cimg.status = GenStatus.FAILED;
+      await this.repo.characterImg.save(cimg);
+      this.logger.error(`[${cimg.characterId}] ${cimg.emotion} 배치 생성 실패: ${result.error.message}`);
+      continue;
+    }
+
+    const nobgBuffer = await this.genAI.removeImageBackground(result.buffer);
+    await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}.png`, result.buffer, 'image/png');
+    await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`, nobgBuffer, 'image/png');
+    cimg.status = GenStatus.DONE;
+    await this.repo.characterImg.save(cimg);
   }
 }
 ```
 
----
+### 3.3 `image.service.ts` — `generateBackgroundImages()` 리팩터링
 
-## 5. `episode.service.ts` 변경 — `buildVnScript`
-
-### 5.1 핵심 변경 로직
-
-기존: `isEntry`/`isExit`/`position`(dialogue 최상위)으로 show/hide 결정  
-변경: `currentScreen` 배열의 포함 여부로 등장/퇴장을 결정 (diff 방식)
-
-각 dialogue 처리 시:
-1. 이전 대사의 `currentScreen`과 현재 대사의 `currentScreen`을 비교
-2. 새로 나타난 캐릭터(혹은 position/emotion이 변경된 캐릭터) → `show character` 명령 추가
-3. 사라진 캐릭터 → `hide character` 명령 추가
-4. 이후 dialogue 또는 narrator 명령 추가
-
-### 5.2 변경 후 `buildVnScript` 구현
+배경 이미지는 `generateCharacterImages()`와 독립된 별도 API(`POST /images/backgrounds`)에서 처리한다.
+기존 `Promise.all` 개별 호출을 단일 배치로 대체한다.
 
 ```typescript
-private buildVnScript(
-  scenes: any[],
-  characterMap: VnCharacterMap,
-): (string | Record<string, string>)[] {
-  const script: (string | Record<string, string>)[] = [];
-  let currentBgmId: string | null = null;
+// 배치 제출 전: 대상 전체를 PROCESSING으로 마킹
+for (const bg of backgrounds) {
+  bg.status = GenStatus.PROCESSING;
+  await this.repo.background.save(bg);
+}
 
-  for (const scene of scenes) {
-    if (scene.bgmId && scene.bgmId !== currentBgmId) {
-      script.push(`play bgm ${scene.bgmId}`);
-      currentBgmId = scene.bgmId;
-    }
-    script.push(`show scene ${scene.backgroundId} with fade`);
+const bgRequests = backgrounds.map(bg => ({
+  prompt:      `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`,
+  metadata:    { bgId: bg.id },
+  aspectRatio: '16:9', imageSize: '2K',
+}));
+const bgResults = await this.genAI.geminiBatchGenerateImages(bgRequests);
 
-    // 현재 화면 상태: charId → { position, emotion }
-    let prevScreen = new Map<string, { position: string; emotion: string }>();
+for (let i = 0; i < bgResults.length; i++) {
+  const result = bgResults[i];
+  const bg = backgrounds[i];
 
-    for (const dialogue of scene.dialogues) {
-      const { characterId, dialog, currentScreen } = dialogue;
-
-      // currentScreen 없는 구버전 scenes.json → isEntry/isExit/position 폴백
-      if (!currentScreen) {
-        // 기존 로직 유지 (하위 호환)
-        this.applyLegacyDialogue(dialogue, prevScreen, script, characterMap);
-        continue;
-      }
-
-      // 신규 포맷: currentScreen diff
-      const nextScreen = new Map<string, { position: string; emotion: string }>(
-        currentScreen.map((e: any) => [e.characterId, { position: e.position, emotion: e.emotion }])
-      );
-
-      // 1. 퇴장: prevScreen에 있으나 nextScreen에 없는 캐릭터
-      for (const [charId] of prevScreen) {
-        if (!nextScreen.has(charId)) {
-          script.push(`hide character ${charId}`);
-        }
-      }
-
-      // 2. 등장 or 변경: nextScreen에 있는 캐릭터 중 prevScreen과 다른 경우
-      for (const [charId, { position, emotion }] of nextScreen) {
-        const prev = prevScreen.get(charId);
-        if (!prev || prev.position !== position || prev.emotion !== emotion) {
-          script.push(`show character ${charId} ${emotion} ${position}`);
-        }
-      }
-
-      prevScreen = nextScreen;
-
-      // 3. 대사 또는 나레이션 추가
-      if (characterId === 'narrator' || characterId === 'unknown') {
-        script.push(dialog);
-      } else {
-        const charName = characterMap[characterId]?.name ?? characterId;
-        script.push({ [charName]: dialog });
-      }
-    }
-
-    // 씬 종료 후 화면 잔류 캐릭터 제거
-    for (const charId of prevScreen.keys()) {
-      script.push(`hide character ${charId}`);
-    }
-    prevScreen.clear();
+  if (result.error) {
+    bg.status = GenStatus.FAILED;
+    await this.repo.background.save(bg);
+    this.logger.error(`[${bg.id}] 배경 배치 생성 실패: ${result.error.message}`);
+    continue;
   }
 
-  script.push('stop bgm');
-  script.push('end');
-  return script;
+  await this.s3HelperService.uploadImage(`series/${seriesId}/backgrounds/${bg.id}.png`, result.buffer, 'image/png');
+  bg.status = GenStatus.DONE;
+  await this.repo.background.save(bg);
 }
 ```
 
-### 5.3 하위 호환 처리 (`applyLegacyDialogue`)
+### 3.4 Leonardo 경로 유지
 
-기존 소설의 scenes.json(`currentScreen` 없는 구버전)은 기존 `isEntry/isExit/position` 로직으로 처리.
-별도 private 메서드(`applyLegacyDialogue`)로 분리하여 기존 코드 보존.
-
----
-
-## 6. 프론트엔드 (`player.js`)
-
-**변경 없음.** 백엔드 `buildVnScript`가 동일한 `show character` / `hide character` 명령 포맷으로 스크립트를 생성하므로 프론트엔드 플레이어는 현행 그대로 동작한다.
+`IMAGE_PROVIDER !== 'gemini'`인 경우 기존 `leonardoGenerateImage()` 흐름을 그대로 유지한다.
+배치 API 전환 대상은 **Gemini 경로만**이다.
 
 ---
 
-## 7. 작업 순서
+## 4. 부가 변경 사항 (추가 개선)
 
-1. `prompt.ts` — DIALOGUE RULES 교체
-2. `parsing.service.ts` — Zod 스키마 수정 + 감정 수집 로직 수정
-3. `episode.service.ts` — `buildVnScript` 교체 (레거시 폴백 포함)
-4. 통합 테스트: 새 소설로 파이프라인 End-to-End 실행 확인
+> 주요 변경(배치 전환)과 별개로 진행 가능.
+
+**Leonardo NOBG → 로컬 처리 전환**
+
+Leonardo 경로에서 `extractAndSaveNobg()` (Leonardo NOBG API 호출, 크레딧 추가 소모)를
+Gemini 경로와 동일하게 `removeImageBackground()` (로컬 처리, 무료)로 대체한다.
+
+변경 파일: `image.service.ts`의 `extractAndSaveNobg()` 제거, `gen-ai-helper.service.ts`의 `leonardoNobg()` 제거.
 
 ---
 
-## 8. 체크리스트
+## 5. 변경 파일 목록
 
-- [ ] `currentScreen`이 없는 구버전 scenes.json(isEntry/isExit/position 포맷)에서 플레이어 정상 동작 확인
-- [ ] narrator 대사 시 화면 캐릭터 유지 확인
-- [ ] 2인 → 3인 진입 시 위치 재배치 확인
-- [ ] 집단 캐릭터 진입 시 기존 캐릭터 전원 퇴장 확인
-- [ ] character_img 플레이스홀더에 currentScreen 감정 포함 확인
+| 파일 | 변경 내용 |
+|---|---|
+| `backend/src/common/gen-ai-helper.service.ts` | `geminiBatchGenerateImages()` 신규 추가 |
+| `backend/src/image/image.service.ts` | `generateCharacterImages()`, `generateBackgroundImages()` 배치 호출로 전환 (Gemini 경로) |
+
+---
+
+## 6. 예상 효과
+
+| 구분 | 변경 전 | 변경 후 |
+|---|---|---|
+| Gemini generateContent 호출 횟수 | 60회 개별 | Phase1: 1회, Phase2-A: 1회, Phase2-B: 1회 → **3회 배치** |
+| HTTP 연결 오버헤드 | 60배 | 3배 |
+| 처리 구조 | 순차/병렬 혼합 | 단계별 배치 → 병렬 배치 |
+| 코드 복잡도 | 캐릭터별 분산 처리 | 단계별 일괄 처리로 단순화 |
+
+> **주의:** Gemini Batch API는 비동기 잡(async job) 방식으로 결과 수신까지 수 분이 소요될 수 있다. 현재 파이프라인의 fire-and-forget 구조(이벤트 에미터 기반)와는 잘 맞지만, 개별 이미지 완료 시점의 DB 업데이트가 배치 완료 시점으로 지연된다는 점을 고려해야 한다.

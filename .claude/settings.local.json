@@ -6,7 +6,11 @@
       "Bash(npx ts-node *)",
       "Bash(npx tsc *)",
       "Bash(find \"/mnt/c/Users/yth00/OneDrive - postech.ac.kr/1. Lecture/9th Semester/과제연구/N2VN/frontend\" -type f -name \"*.css\" -o -name \"*.scss\" -o -name \"*.jsx\" -o -name \"*.js\" -o -name \"*.tsx\" -o -name \"*.ts\" | head -50)",
-      "Read(//mnt/c/Users/yth00/OneDrive - postech.ac.kr/1. Lecture/9th Semester/과제연구/N2VN/**)"
+      "Read(//mnt/c/Users/yth00/OneDrive - postech.ac.kr/1. Lecture/9th Semester/과제연구/N2VN/**)",
+      "Bash(xargs grep -l \"JobState\\\\|BatchState\")",
+      "Bash(Get-ChildItem -Recurse \"c:\\\\Users\\\\yth00\\\\OneDrive - postech.ac.kr\\\\1. Lecture\\\\9th Semester\\\\과제연구\\\\N2VN\\\\backend\\\\node_modules\\\\@google\\\\genai\" -Filter \"*.d.ts\")",
+      "Bash(Select-String -Pattern \"JobState|BatchState\")",
+      "Bash(Select-Object -First 10)"
     ]
   }
 }

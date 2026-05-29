@@ -21,4 +21,7 @@ export class Character {
 
   @Column({ type: 'text' })
   look: string;
+
+  @Column({ type: 'int', default: 1 })
+  subjectCount: number;
 }

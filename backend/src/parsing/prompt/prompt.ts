@@ -14,7 +14,8 @@ Only extract characters that are completely new and not represented below.
 - [STRICTLY FORBIDDEN] Do NOT include any facial expressions, emotions, or mood descriptions in the 'look' field.
 - The 'look' field MUST be a dense, comma-separated English prompt designed for Stable Diffusion / Leonardo API.
 - [VITAL: CREATIVE INFERENCE] If specific physical traits or clothing details are not explicitly mentioned, INFER and CREATE highly specific details based on the character's job, personality, and genre. Do not use generic words or "unknown".
-- Format the 'look' field by strictly combining these 5 elements: 1. Age/Gender, 2. Detailed Hair, 3. Face/Body features, 4. Detailed Clothing, 5. Props/Weapons.
+- Format the 'look' field by strictly combining these 5 elements: 1. Age/Gender (use plural if subjectCount > 1, e.g. "3 teenage girls"), 2. Detailed Hair, 3. Face/Body features, 4. Detailed Clothing, 5. Props/Weapons.
+- 'subjectCount' field: the EXACT number of distinct individuals this character entry represents. Use 1 for a single person. Use 2 or more for a group that always appears together as a unit (e.g. a trio of soldiers = 3). Maximum value is 3. This number must match the Age/Gender description in 'look'.
 - If there are NO new characters in this episode, return an empty object for the "characters" field.
 
 Novel Text:

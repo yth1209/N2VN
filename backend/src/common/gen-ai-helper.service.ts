@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import { StructuredOutputParser } from '@langchain/core/output_parsers';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, JobState } from '@google/genai';
 import { ZodSchema } from 'zod';
 import axios from 'axios';
 import { removeBackground } from '@imgly/background-removal-node';
@@ -222,6 +222,62 @@ export class GenAIHelperService {
     return Buffer.from(arrayBuffer);
   }
 
+  // ── Gemini Batch Image ──────────────────────────────────────────────────────
+
+  /**
+   * 여러 이미지 생성 요청을 Gemini Batch API로 일괄 제출.
+   * batches.create()는 잡 핸들만 즉시 반환하므로, pollBatchJob()으로 완료를 기다린다.
+   * 응답 순서는 요청 순서와 동일(index 매핑 보장).
+   */
+  async geminiBatchGenerateImages(
+    requests: Array<{
+      prompt:           string;
+      initImageBuffer?: Buffer;
+      aspectRatio?:     string;
+      imageSize?:       string;
+      metadata?:        Record<string, string>;
+    }>,
+  ): Promise<Array<{ buffer?: Buffer; error?: { message: string }; metadata?: Record<string, string> }>> {
+    const inlinedRequests = requests.map((req) => {
+      const parts: any[] = [{ text: req.prompt }];
+      if (req.initImageBuffer) {
+        parts.push({
+          inlineData: { mimeType: 'image/png', data: req.initImageBuffer.toString('base64') },
+        });
+      }
+      return {
+        contents: parts,
+        config: {
+          responseModalities: ['IMAGE', 'TEXT'],
+          responseFormat: { image: { aspectRatio: req.aspectRatio ?? '1:1', imageSize: req.imageSize ?? '1K' } },
+        } as any,
+        ...(req.metadata ? { metadata: req.metadata } : {}),
+      };
+    });
+
+    const job = await this.geminiImageAI.batches.create({
+      model: this.geminiImageModel,
+      src:   inlinedRequests,
+    });
+    this.logger.log(`[Batch] 잡 제출: ${job.name} (${requests.length}개 요청)`);
+
+    const completedJob = await this.pollBatchJob(job.name);
+    const responses = completedJob.dest?.inlinedResponses ?? [];
+
+    return responses.map((resp: any, i: number) => {
+      const metadata = requests[i]?.metadata;
+      if (resp.error) {
+        return { error: { message: resp.error.message ?? 'Unknown error' }, metadata };
+      }
+      const inlineData = resp.response?.candidates?.[0]?.content?.parts
+        ?.find((p: any) => p.inlineData)?.inlineData;
+      if (!inlineData?.data) {
+        return { error: { message: 'Gemini batch: image data 없음' }, metadata };
+      }
+      return { buffer: Buffer.from(inlineData.data, 'base64'), metadata };
+    });
+  }
+
   // ── 공통 유틸 ────────────────────────────────────────────────────────────────
 
   private async poll<T>(taskName: string, fn: () => Promise<T | null>): Promise<T> {
@@ -231,5 +287,22 @@ export class GenAIHelperService {
       if (result) return result;
     }
     throw new Error(`${taskName} timeout after 180s`);
+  }
+
+  // Batch API 전용 폴링 — 10s 간격, 최대 2시간 대기
+  private async pollBatchJob(name: string): Promise<any> {
+    const INTERVAL_MS  = 10_000;
+    const MAX_ATTEMPTS = 720;
+
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      await new Promise((r) => setTimeout(r, INTERVAL_MS));
+      const job = await this.geminiImageAI.batches.get({ name });
+      this.logger.log(`[Batch] ${name} 상태: ${job.state} (${i + 1}/${MAX_ATTEMPTS})`);
+      if (job.state === JobState.JOB_STATE_SUCCEEDED) return job;
+      if ([JobState.JOB_STATE_FAILED, JobState.JOB_STATE_CANCELLED, JobState.JOB_STATE_EXPIRED].includes(job.state)) {
+        throw new Error(`Batch job ${name} 실패: ${job.state}`);
+      }
+    }
+    throw new Error(`Batch job ${name} 타임아웃 (${(MAX_ATTEMPTS * INTERVAL_MS) / 1000}s)`);
   }
 }
