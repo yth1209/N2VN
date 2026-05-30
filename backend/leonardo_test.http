@@ -1,0 +1,118 @@
+### Leonardo AI API 직접 테스트
+@leonardoKey = L2A_k5i1RzE8hE7r6t3K6k7v6m3j6d0i6p8f9g7h6k5l6n4o3c2b1a0
+@generationId = FILL_AFTER_STEP1
+@imageGenId   = FILL_AFTER_STEP2  # generated_images[0].id
+@nobgJobId    = FILL_AFTER_STEP3
+
+
+
+### ══════════════════════════════════════
+###  STEP 1: 이미지 생성 요청
+###  -> 응답의 generate.generationId 를 @generationId 에 기입
+### ══════════════════════════════════════
+
+### 1-A. 기본 이미지 생성 (프롬프트만)
+POST https://cloud.leonardo.ai/api/rest/v2/generations
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{leonardoKey}}
+
+{
+  "model": "flux-pro-2.0",
+  "public": false,
+  "parameters": {
+    "width": 576,
+    "height": 1024,
+    "quantity": 1,
+    "prompt": "a young woman with long black hair, wearing a white hanbok, standing in a traditional korean courtyard, soft sunlight, detailed illustration"
+  }
+}
+
+### 1-B. 스타일 UUID 적용 이미지 생성
+POST https://cloud.leonardo.ai/api/rest/v2/generations
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{leonardoKey}}
+
+{
+  "model": "flux-pro-2.0",
+  "public": false,
+  "parameters": {
+    "width": 576,
+    "height": 1024,
+    "quantity": 1,
+    "prompt": "a young woman with long black hair, wearing a white hanbok, standing in a traditional korean courtyard, soft sunlight, detailed illustration",
+    "styleUUID": "STYLE_UUID_HERE"
+  }
+}
+
+### 1-C. Image Reference(initImageId) 적용 이미지 생성 — 감정 변형용
+POST https://cloud.leonardo.ai/api/rest/v2/generations
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{leonardoKey}}
+
+{
+  "model": "flux-pro-2.0",
+  "public": false,
+  "parameters": {
+    "width": 576,
+    "height": 1024,
+    "quantity": 1,
+    "prompt": "same character, crying expression, tears on cheeks",
+    "guidances": {
+      "image_reference": [
+        {
+          "image": {
+            "id": "{{imageGenId}}",
+            "type": "GENERATED"
+          },
+          "strength": "HIGH"
+        }
+      ]
+    }
+  }
+}
+
+
+
+### ══════════════════════════════════════
+###  STEP 2: 생성 상태 폴링
+###  -> status == "COMPLETE" 확인 후
+###     generated_images[0].id 를 @imageGenId 에 기입
+### ══════════════════════════════════════
+
+### 2. 생성 상태 조회
+GET https://cloud.leonardo.ai/api/rest/v1/generations/{{generationId}}
+Accept: application/json
+Authorization: Bearer {{leonardoKey}}
+
+
+
+### ══════════════════════════════════════
+###  STEP 3: NOBG (배경 제거) 요청
+###  -> 응답의 sdNobgJob.id 를 @nobgJobId 에 기입
+### ══════════════════════════════════════
+
+### 3. NOBG 변환 요청
+POST https://cloud.leonardo.ai/api/rest/v1/variations/nobg
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer {{leonardoKey}}
+
+{
+  "id": "{{imageGenId}}"
+}
+
+
+
+### ══════════════════════════════════════
+###  STEP 4: NOBG 완료 폴링
+###  -> generated_image_variation_generic 배열에서
+###     transformType == "NOBG" 인 항목의 url 확인
+### ══════════════════════════════════════
+
+### 4. NOBG 상태 조회
+GET https://cloud.leonardo.ai/api/rest/v1/variations/{{nobgJobId}}
+Accept: application/json
+Authorization: Bearer {{leonardoKey}}

@@ -37,12 +37,12 @@ export class EpisodeController {
     return { success: true, data };
   }
 
-  @Get(':num/vn-script')
+  @Get(':episodeId/vn-script')
   async getVnScript(
     @Param('seriesId') seriesId: string,
-    @Param('num', ParseIntPipe) num: number,
+    @Param('episodeId') episodeId: string,
   ) {
-    const data = await this.episodeService.getVnScript(seriesId, num);
+    const data = await this.episodeService.getVnScript(seriesId, episodeId);
     return { success: true, data };
   }
 

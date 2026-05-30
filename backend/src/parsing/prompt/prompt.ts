@@ -14,30 +14,9 @@ Only extract characters that are completely new and not represented below.
 - [STRICTLY FORBIDDEN] Do NOT include any facial expressions, emotions, or mood descriptions in the 'look' field.
 - The 'look' field MUST be a dense, comma-separated English prompt designed for Stable Diffusion / Leonardo API.
 - [VITAL: CREATIVE INFERENCE] If specific physical traits or clothing details are not explicitly mentioned, INFER and CREATE highly specific details based on the character's job, personality, and genre. Do not use generic words or "unknown".
-- Format the 'look' field by strictly combining these 5 elements: 1. Age/Gender, 2. Detailed Hair, 3. Face/Body features, 4. Detailed Clothing, 5. Props/Weapons.
+- Format the 'look' field by strictly combining these 5 elements: 1. Age/Gender (use plural if subjectCount > 1, e.g. "3 teenage girls"), 2. Detailed Hair, 3. Face/Body features, 4. Detailed Clothing, 5. Props/Weapons.
+- 'subjectCount' field: the EXACT number of distinct individuals this character entry represents. Use 1 for a single person. Use 2 or more for a group that always appears together as a unit (e.g. a trio of soldiers = 3). Maximum value is 3. This number must match the Age/Gender description in 'look'.
 - If there are NO new characters in this episode, return an empty object for the "characters" field.
-
-Novel Text:
-"""
-{novel_text}
-"""`;
-
-export const background_prompt = `
-You are an expert novel environment designer.
-Read the following novel text carefully and extract detailed information about ALL **NEW** distinct physical locations and background settings appearing in the text.
-
-{format_instructions}
-
-[EXISTING BACKGROUNDS — DO NOT RE-EXTRACT THESE]
-The following backgrounds already exist in the system. Do NOT include them in your output.
-Only extract backgrounds that are completely new and not represented below.
-{existing_backgrounds}
-
-[CRITICAL INSTRUCTIONS]
-- Do NOT translate the location's name into English. Keep the original name exactly as it appears in the text.
-- Translate all descriptive traits (description) into short English phrases.
-- Do not invent locations that are not supported by the text.
-- If there are NO new backgrounds in this episode, return an empty object for the "backgrounds" field.
 
 Novel Text:
 """
@@ -48,42 +27,58 @@ export const scene_prompt = `
 You are an expert novel scriptwriter and director.
 Your task is to analyze the provided novel text and break it down into multiple Scenes based on changes in Location or Time.
 
-For each Scene, extract the following:
-- backgroundId: The exact ID of the background from the provided 'backgrounds_info' that matches the current location. If completely unknown or unlisted, use "bg_unknown".
-- timeOfDay: The time of day or temporal setting (e.g., Morning, Night, Dusk).
-- bgm_prompt: A 1-2 sentence description in English for a Background Music generation AI that perfectly fits the mood and atmosphere of this scene.
-- dialogues: A sequential array of dialogues and narrations.
-
-For EACH line of text or dialogue in the scene, create a dialogue prompt with:
-- characterId: Use the provided characters_info to exactly match the speaker to their ID. If it is a descriptive sentence or narration, use "narrator". If it's an unknown character, use "unknown".
-- dialog: The exact original text of the narration or dialogue (Do NOT translate).
-- action: A short English phrase describing the speaker's actions/movements.
-- emotion: A short English word describing the emotion.
-- look: A short English phrase describing the speaker's appearance (if mentioned or implied in this scene).
+Before listing scenes, you MUST declare all NEW backgrounds and BGMs in the newBackgrounds and newBgms arrays.
+Then reference them by tempId in the scenes array.
 
 {format_instructions}
 
-[CRITICAL INSTRUCTIONS]
-- For character dialogues: Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field.
-- For narrations/descriptions (characterId: "narrator"): EXCLUDE purely visual descriptions, emotional expositions, or redundant explanations of previous dialogues. ONLY keep essential plot advancements.
-- When keeping essential narrator blocks, summarize and compress them concisely in the original language. Avoid consecutive "narrator" blocks.
-- Do NOT translate names. Use the original character names from the text.
-- Provide "action", "emotion", "look", and "bgm_prompt" ONLY in English.
-- isEntry / isExit rules:
-  * Set isEntry: true on the FIRST dialogue line of a character within a scene.
-  * Set isExit: true on the LAST dialogue line of a character within a scene.
-  * A single-line character (appears once in a scene) has both isEntry AND isExit both true.
-  * narrator always has isEntry: false and isExit: false.
-- position rules:
-  * If only one character is currently on screen: position = "center".
-  * If two or more characters are simultaneously on screen, assign "left" or "right" based on natural conversation flow.
-  * narrator always has position = "center".
+[BACKGROUND RULES]
+- If the scene location matches an entry in the existing backgrounds list, reuse that ID directly as backgroundId.
+- If it is a NEW location not in the list, add it to newBackgrounds with tempId like "new_bg_1", "new_bg_2", etc., then use that tempId as backgroundId.
+- timeOfDay is specified per scene and must NOT appear in the background description.
+- If the location is completely unknown, use "bg_unknown" as backgroundId.
+
+[BGM RULES]
+- If the scene mood/category matches an existing BGM, reuse that ID as bgmId.
+- If it requires NEW music, add it to newBgms with tempId like "new_bgm_1", "new_bgm_2", etc., then use that tempId as bgmId.
+- Consecutive scenes with a similar mood SHOULD share the same bgmId to preserve musical continuity.
+- BGM prompt must be in English, under 30 words (e.g., "calm piano melody with soft strings, peaceful ambient").
+
+[DIALOGUE RULES]
+
+# 1. Text & Metadata Rules
+- Ensure NO dialogue is skipped. Retain the exact original language for the "dialog" field. Do NOT translate.
+- characterId: match the speaker to their ID using characters_info. Use "narrator" for narration, "unknown" for unidentified characters.
+- Narrator Blocks: EXCLUDE purely visual descriptions or emotional expositions. ONLY keep essential plot advancements. Summarize and compress. Avoid consecutive narrator blocks.
+
+# 2. Screen State & Positioning Rules (CRITICAL)
+- "currentScreen" Field: Every dialogue block MUST include a "currentScreen" array detailing ONLY the visible characters on screen during that turn. Do NOT use entry/exit flags. The presence or absence of a character in this array dictates their entry or exit.
+- Narrator Exclusion: The narrator is EXCLUDED from the "currentScreen" array.
+
+# 3. Dynamic Layout Adjustment (Inside "currentScreen")
+- Each currentScreen entry contains: characterId, position, emotion, look, action — for that character AT THIS MOMENT.
+- emotion / look: Provide ONLY in English.
+- action: MUST ONLY be one of: ["IDLE", "ATTACK", "SHAKE"].
+- 1 Character: MUST be "center".
+- 2 Characters: MUST be "left" and "right". (If a 2nd character joins a single character, the existing character must be moved to "left" or "right").
+- 3 Characters: MUST be "left", "center", and "right".
+- Overcrowding Prevention: MAX 3 characters. If a 4th must appear, REMOVE the least active character from the "currentScreen" array to make room.
+
+# 4. Group Character Monopoly Exception
+- If a character represents a group (e.g., crowd, mob, gang):
+  * They MUST be alone on screen.
+  * ALL other characters MUST be completely removed from the "currentScreen" array in that turn.
+  * The group character's position MUST be "center".
+
 
 Known Characters Information:
 {characters_info}
 
-Known Backgrounds Information:
-{backgrounds_info}
+## Existing Backgrounds (reuse if matching)
+{existing_backgrounds}
+
+## Existing BGMs (reuse if matching)
+{existing_bgms}
 
 Novel Text:
 """

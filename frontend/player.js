@@ -4,11 +4,21 @@ let vnScript   = [];
 let scriptIndex = 0;
 let characters  = {};   // { charId: { name, sprites: { emotion: url } } }
 let scenes      = {};   // { bgId: url }
+let bgmMap      = {};   // { bgmId: url | null }
 let onScreen    = {};   // { charId: { emotion, position } }
 
 let isTyping   = false;
 let typeTimer  = null;
 let fullText   = '';
+
+// ── BGM State ──────────────────────────────────────
+const bgmAudio      = new Audio();
+let   isMuted       = false;
+let   currentBgmId  = null;
+
+const FADE_DURATION_MS = 1000;
+const FADE_STEP_MS     = 50;
+const FADE_STEPS       = FADE_DURATION_MS / FADE_STEP_MS;
 
 // ── DOM ────────────────────────────────────────────
 const loadingEl     = document.getElementById('loading-overlay');
@@ -27,17 +37,23 @@ const endScreen   = document.getElementById('end-screen');
 
 // ── Entry ──────────────────────────────────────────
 window.addEventListener('message', async (event) => {
-  const { seriesId, episodeNumber } = event.data ?? {};
-  if (!seriesId || !episodeNumber) return;
-  await loadScript(seriesId, episodeNumber);
+  if (event.data?.type === 'stop') {
+    bgmAudio.pause();
+    bgmAudio.currentTime = 0;
+    currentBgmId = null;
+    return;
+  }
+  const { seriesId, episodeId } = event.data ?? {};
+  if (!seriesId || !episodeId) return;
+  await loadScript(seriesId, episodeId);
 });
 
-async function loadScript(seriesId, episodeNumber) {
+async function loadScript(seriesId, episodeId) {
   loadingEl.classList.remove('hidden');
-  loadingTextEl.textContent = `${episodeNumber}화 데이터를 불러오는 중...`;
+  loadingTextEl.textContent = `${episodeId}화 데이터를 불러오는 중...`;
 
   try {
-    const res    = await fetch(`${BASE_URL}/series/${seriesId}/episodes/${episodeNumber}/vn-script`);
+    const res    = await fetch(`${BASE_URL}/series/${seriesId}/episodes/${episodeId}/vn-script`);
     const result = await res.json();
 
     if (!result.success) {
@@ -47,10 +63,13 @@ async function loadScript(seriesId, episodeNumber) {
 
     characters  = result.data.characters;
     scenes      = result.data.scenes;
+    bgmMap      = result.data.bgm ?? {};
     vnScript    = result.data.script;
     scriptIndex = 0;
     onScreen    = {};
+    currentBgmId = null;
 
+    initSoundState();
     loadingEl.classList.add('hidden');
     setupInput();
     processNext(); // 자동 시작
@@ -97,6 +116,19 @@ function processNext() {
 function executeCommand(cmd) {
   if (typeof cmd === 'string') {
     if (cmd === 'end') { showEnd(); return false; }
+
+    // play bgm {bgmId}
+    const bgmMatch = cmd.match(/^play bgm (\S+)/);
+    if (bgmMatch) {
+      playBgm(bgmMatch[1]);
+      return false;
+    }
+
+    // stop bgm
+    if (cmd === 'stop bgm') {
+      fadeBgm(0).then(() => { bgmAudio.pause(); currentBgmId = null; });
+      return false;
+    }
 
     // show scene {bgId} [with fade]
     const bgMatch = cmd.match(/^show scene (\S+)/);
@@ -157,7 +189,7 @@ function showCharacter(charId, emotion, position) {
   const url = charData.sprites[emotion] || charData.sprites['DEFAULT'];
   if (!url) return;
 
-  const slot = charSlots[position] || charSlots['center'];
+  const newSlot = charSlots[position] || charSlots['center'];
 
   // 같은 슬롯에 있던 다른 캐릭터 제거
   for (const [existId, info] of Object.entries(onScreen)) {
@@ -166,13 +198,45 @@ function showCharacter(charId, emotion, position) {
     }
   }
 
-  // 이 캐릭터가 다른 슬롯에 있었다면 그 슬롯 비우기
-  if (onScreen[charId] && onScreen[charId].position !== position) {
-    const oldSlot = charSlots[onScreen[charId].position];
-    if (oldSlot) oldSlot.innerHTML = '';
+  const prevInfo = onScreen[charId];
+
+  if (prevInfo && prevInfo.position !== position) {
+    // 위치 변경 → FLIP 슬라이드 애니메이션
+    const oldSlot = charSlots[prevInfo.position];
+    const oldImg  = oldSlot?.querySelector(`img[data-char-id="${charId}"]`);
+
+    if (oldImg) {
+      const oldRect = oldImg.getBoundingClientRect();
+      oldSlot.innerHTML = '';
+      newSlot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+      const newImg  = newSlot.querySelector(`img[data-char-id="${charId}"]`);
+      const newRect = newImg.getBoundingClientRect();
+
+      const dx = oldRect.left - newRect.left;
+      newImg.style.transition = 'none';
+      newImg.style.transform  = `translateX(${dx}px)`;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          newImg.style.transition = 'transform 0.4s ease';
+          newImg.style.transform  = 'translateX(0)';
+          newImg.addEventListener('transitionend', () => {
+            newImg.style.transition = '';
+            newImg.style.transform  = '';
+          }, { once: true });
+        });
+      });
+    } else {
+      newSlot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+    }
+  } else {
+    const existingImg = newSlot.querySelector(`img[data-char-id="${charId}"]`);
+    if (existingImg) {
+      existingImg.src = url;
+    } else {
+      newSlot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
+    }
   }
 
-  slot.innerHTML = `<img src="${url}" alt="${charData.name}" data-char-id="${charId}">`;
   onScreen[charId] = { emotion, position };
 }
 
@@ -212,11 +276,12 @@ function showDialogue(speaker, text) {
   advanceHint.style.opacity = '0';
 
   if (speaker) {
-    speakerEl.textContent    = speaker;
-    speakerEl.style.display  = 'block';
+    speakerEl.textContent      = speaker;
+    speakerEl.style.visibility = 'visible';
     highlightSpeaker(speaker);
   } else {
-    speakerEl.style.display = 'none';
+    speakerEl.textContent      = ' ';
+    speakerEl.style.visibility = 'hidden';
     clearHighlights();
   }
 
@@ -248,3 +313,62 @@ function showEnd() {
   clearHighlights();
   endScreen.style.display = 'flex';
 }
+
+// ── BGM ────────────────────────────────────────────
+function initSoundState() {
+  isMuted = localStorage.getItem('n2vn_muted') === 'true';
+  const btn = document.getElementById('sound-toggle-btn');
+  if (btn) btn.textContent = isMuted ? '🔇' : '🔊';
+  bgmAudio.muted = isMuted;
+}
+
+async function playBgm(bgmId) {
+  if (bgmId === currentBgmId) return; // 동일 BGM → 그대로 재생
+
+  const url = bgmMap[bgmId];
+
+  // 현재 재생 중이면 페이드아웃 후 정지
+  if (!bgmAudio.paused) {
+    await fadeBgm(0);
+    bgmAudio.pause();
+  }
+
+  currentBgmId = bgmId;
+
+  if (!url) return; // 미생성 BGM → 무음으로 계속
+
+  bgmAudio.src    = url;
+  bgmAudio.loop   = true;
+  bgmAudio.volume = 0;
+  bgmAudio.muted  = isMuted;
+  bgmAudio.play().catch(() => {}); // autoplay 정책 무시
+  await fadeBgm(0.6);
+}
+
+function fadeBgm(targetVolume) {
+  return new Promise((resolve) => {
+    const startVolume = bgmAudio.volume;
+    const delta       = (targetVolume - startVolume) / FADE_STEPS;
+    let   step        = 0;
+
+    const interval = setInterval(() => {
+      step++;
+      bgmAudio.volume = Math.min(1, Math.max(0, startVolume + delta * step));
+      if (step >= FADE_STEPS) {
+        bgmAudio.volume = targetVolume;
+        clearInterval(interval);
+        resolve();
+      }
+    }, FADE_STEP_MS);
+  });
+}
+
+// 사운드 토글 버튼 이벤트
+document.getElementById('sound-toggle-btn')?.addEventListener('click', (e) => {
+  e.stopPropagation(); // VN container click 이벤트 방지
+  isMuted = !isMuted;
+  localStorage.setItem('n2vn_muted', String(isMuted));
+  const btn = document.getElementById('sound-toggle-btn');
+  if (btn) btn.textContent = isMuted ? '🔇' : '🔊';
+  bgmAudio.muted = isMuted;
+});

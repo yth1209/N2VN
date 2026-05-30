@@ -1,6 +1,7 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
 
 @Injectable()
 export class S3HelperService {
@@ -73,7 +74,11 @@ export class S3HelperService {
     return JSON.parse(textData);
   }
 
-  async uploadImage(objectKey: string, buffer: Buffer, mimeType: string = 'image/png'): Promise<void> {
+  async uploadImage(objectKey: string | string[], buffer: Buffer, mimeType: string = 'image/png'): Promise<void> {
+    if (Array.isArray(objectKey)) {
+      await Promise.all(objectKey.map(key => this.uploadImage(key, buffer, mimeType)));
+      return;
+    }    
     try {
       const command = new PutObjectCommand({
         Bucket: this.bucketName,
@@ -87,6 +92,40 @@ export class S3HelperService {
     } catch (error) {
       this.logger.error(`S3 이미지 업로드 실패: ${objectKey}`, error);
       throw new HttpException(`Failed to upload image to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  async downloadImage(objectKey: string): Promise<Buffer> {
+    try {
+      const command = new GetObjectCommand({ Bucket: this.bucketName, Key: objectKey });
+      const response = await this.s3Client.send(command);
+      const stream = response.Body as Readable;
+      return new Promise<Buffer>((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        stream.on('error', reject);
+      });
+    } catch (error) {
+      this.logger.error(`S3 이미지 다운로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to download image from S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  async uploadAudio(objectKey: string, buffer: Buffer, mimeType: string = 'audio/mpeg'): Promise<void> {
+    try {
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        Body: buffer,
+        ContentType: mimeType,
+        ServerSideEncryption: 'AES256',
+      });
+      await this.s3Client.send(command);
+      this.logger.log(`Saved audio to S3: ${objectKey}`);
+    } catch (error) {
+      this.logger.error(`S3 오디오 업로드 실패: ${objectKey}`, error);
+      throw new HttpException(`Failed to upload audio to S3: ${objectKey}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }

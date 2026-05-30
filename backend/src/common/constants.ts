@@ -36,6 +36,16 @@ export enum StyleKey {
   VIBRANT = 'VIBRANT',
 }
 
+export enum BgmCategory {
+  ACTION   = 'ACTION',
+  ROMANCE  = 'ROMANCE',
+  MYSTERY  = 'MYSTERY',
+  PEACEFUL = 'PEACEFUL',
+  SAD      = 'SAD',
+  EPIC     = 'EPIC',
+  DARK     = 'DARK',
+}
+
 export const STYLE_UUIDS: Record<string, string> = {
   BOKEH: '9fdc5e8c-4d13-49b4-9ce6-5a74cbb19177',
   CINEMATIC: 'a5632c7c-ddbb-4e2f-ba34-8456ab3ac436',

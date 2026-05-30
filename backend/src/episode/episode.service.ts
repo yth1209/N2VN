@@ -9,6 +9,7 @@ import { EpisodeResponseDto } from './dto/episode.response.dto';
 import { EpisodeStatus } from '../entities/episode.entity';
 import { StepKey, STEP_ORDER, StepStatus } from '../entities/episode-pipeline-step.entity';
 import { Emotion } from '../common/constants';
+import { GenStatus } from 'src/entities/common/common.enum';
 
 type VnCharacterMap = Record<string, { name: string; sprites: Record<string, string> }>;
 
@@ -75,12 +76,12 @@ export class EpisodeService {
 
     // 6. S3 업로드: novel.txt
     await this.s3Helper.uploadText(
-      `series/${seriesId}/episodes/${episodeNumber}/novel.txt`,
+      `series/${seriesId}/episodes/${episode.id}/novel.txt`,
       file.buffer.toString('utf-8'),
     );
 
     // 7. 파이프라인 fire-and-forget
-    this.pipelineService.run(seriesId, episodeNumber).catch(() => {});
+    this.pipelineService.run(episode.id).catch(() => {});
 
     const pipelineSteps = await this.repo.pipelineStep.find({ where: { episodeId: episode.id } });
     return new EpisodeResponseDto(episode, pipelineSteps);
@@ -111,11 +112,11 @@ export class EpisodeService {
     await this.repo.episode.remove(episode);
   }
 
-  async getVnScript(seriesId: string, episodeNumber: number) {
+  async getVnScript(seriesId: string, episodeId: string) {
     const series = await this.repo.series.findOne({ where: { id: seriesId } });
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
-    const episode = await this.repo.episode.findOne({ where: { seriesId, episodeNumber } });
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
     if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
     if (episode.status !== EpisodeStatus.DONE) {
       throw new HttpException('에피소드 처리가 완료되지 않았습니다.', HttpStatus.BAD_REQUEST);
@@ -125,7 +126,7 @@ export class EpisodeService {
 
     // S3에서 scenes.json 읽기
     const scenesData = await this.s3Helper.readJson(
-      `series/${seriesId}/episodes/${episodeNumber}/scenes.json`,
+      `series/${seriesId}/episodes/${episodeId}/scenes.json`,
     );
 
     // 캐릭터, 배경 조회 (N+1 방지)
@@ -149,11 +150,8 @@ export class EpisodeService {
       const images  = imagesByChar.get(char.id) ?? [];
       const sprites: Record<string, string> = {};
       for (const img of images) {
-        if (img.nobgGenId) {
-          sprites[img.emotion] = `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}_NOBG.png`;
-        } else if (img.genId) {
-          sprites[img.emotion] = `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}.png`;
-        }
+        if(img.status !== GenStatus.DONE) continue;
+        sprites[img.emotion] = `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}_NOBG.png`;
       }
       const defaultUrl = sprites[Emotion.DEFAULT];
       if (defaultUrl) {
@@ -167,11 +165,20 @@ export class EpisodeService {
     // 배경 맵
     const sceneMap: Record<string, string> = {};
     for (const bg of backgrounds) {
-      if (bg.genId) sceneMap[bg.id] = `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png`;
+      if (bg.status === GenStatus.DONE) sceneMap[bg.id] = `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png`;
+    }
+
+    // BGM 맵
+    const bgmList = await this.repo.bgm.find({ where: { seriesId } });
+    const bgmMap: Record<string, string | null> = {};
+    for (const bgm of bgmList) {
+      bgmMap[bgm.id] = bgm.status === GenStatus.DONE
+        ? `${baseUrl}/series/${seriesId}/bgm/${bgm.id}.mp3`
+        : null;
     }
 
     const script = this.buildVnScript(scenesData.scenes, characterMap);
-    return { characters: characterMap, scenes: sceneMap, script };
+    return { characters: characterMap, scenes: sceneMap, bgm: bgmMap, script };
   }
 
   private buildVnScript(
@@ -179,49 +186,94 @@ export class EpisodeService {
     characterMap: VnCharacterMap,
   ): (string | Record<string, string>)[] {
     const script: (string | Record<string, string>)[] = [];
+    let currentBgmId: string | null = null;
 
     for (const scene of scenes) {
+      if (scene.bgmId && scene.bgmId !== currentBgmId) {
+        script.push(`play bgm ${scene.bgmId}`);
+        currentBgmId = scene.bgmId;
+      }
       script.push(`show scene ${scene.backgroundId} with fade`);
-      const onScreen = new Map<string, { emotion: string; position: string }>();
+
+      let prevScreen = new Map<string, { position: string; emotion: string }>();
 
       for (const dialogue of scene.dialogues) {
-        const { characterId, dialog, emotion, isEntry, isExit, position } = dialogue;
-        const entry = isEntry  ?? false;
-        const exit  = isExit   ?? false;
-        const pos   = position ?? 'center';
-        const emo   = emotion  ?? Emotion.DEFAULT;
+        const { characterId, dialog, currentScreen } = dialogue;
 
-        if (characterId === 'narrator' || characterId === 'unknown') {
-          script.push(dialog);
+        if (!currentScreen) {
+          this.applyLegacyDialogue(dialogue, prevScreen, script, characterMap);
           continue;
         }
 
-        const charName = characterMap[characterId]?.name ?? characterId;
+        const nextScreen = new Map<string, { position: string; emotion: string }>(
+          currentScreen.map((e: any) => [e.characterId, { position: e.position, emotion: e.emotion }]),
+        );
 
-        if (entry && !onScreen.has(characterId)) {
-          script.push(`show character ${characterId} ${emo} ${pos}`);
-          onScreen.set(characterId, { emotion: emo, position: pos });
-        } else if (onScreen.has(characterId)) {
-          const prev = onScreen.get(characterId)!;
-          if (prev.emotion !== emo || prev.position !== pos) {
-            script.push(`show character ${characterId} ${emo} ${pos}`);
-            onScreen.set(characterId, { emotion: emo, position: pos });
+        for (const [charId] of prevScreen) {
+          if (!nextScreen.has(charId)) script.push(`hide character ${charId}`);
+        }
+
+        for (const [charId, { position, emotion }] of nextScreen) {
+          const prev = prevScreen.get(charId);
+          if (!prev || prev.position !== position || prev.emotion !== emotion) {
+            script.push(`show character ${charId} ${emotion} ${position}`);
           }
         }
 
-        script.push({ [charName]: dialog });
+        prevScreen = nextScreen;
 
-        if (exit) {
-          script.push(`hide character ${characterId}`);
-          onScreen.delete(characterId);
+        if (characterId === 'narrator' || characterId === 'unknown') {
+          script.push(dialog);
+        } else {
+          const charName = characterMap[characterId]?.name ?? characterId;
+          script.push({ [charName]: dialog });
         }
       }
 
-      for (const charId of onScreen.keys()) script.push(`hide character ${charId}`);
-      onScreen.clear();
+      for (const charId of prevScreen.keys()) script.push(`hide character ${charId}`);
+      prevScreen.clear();
     }
 
+    script.push('stop bgm');
     script.push('end');
     return script;
+  }
+
+  private applyLegacyDialogue(
+    dialogue: any,
+    prevScreen: Map<string, { position: string; emotion: string }>,
+    script: (string | Record<string, string>)[],
+    characterMap: VnCharacterMap,
+  ): void {
+    const { characterId, dialog, emotion, isEntry, isExit, position } = dialogue;
+    const entry = isEntry  ?? false;
+    const exit  = isExit   ?? false;
+    const pos   = position ?? 'center';
+    const emo   = emotion  ?? Emotion.DEFAULT;
+
+    if (characterId === 'narrator' || characterId === 'unknown') {
+      script.push(dialog);
+      return;
+    }
+
+    const charName = characterMap[characterId]?.name ?? characterId;
+
+    if (entry && !prevScreen.has(characterId)) {
+      script.push(`show character ${characterId} ${emo} ${pos}`);
+      prevScreen.set(characterId, { emotion: emo, position: pos });
+    } else if (prevScreen.has(characterId)) {
+      const prev = prevScreen.get(characterId)!;
+      if (prev.emotion !== emo || prev.position !== pos) {
+        script.push(`show character ${characterId} ${emo} ${pos}`);
+        prevScreen.set(characterId, { emotion: emo, position: pos });
+      }
+    }
+
+    script.push({ [charName]: dialog });
+
+    if (exit) {
+      script.push(`hide character ${characterId}`);
+      prevScreen.delete(characterId);
+    }
   }
 }

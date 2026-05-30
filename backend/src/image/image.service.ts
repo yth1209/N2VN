@@ -1,109 +1,257 @@
 import { Injectable, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
 import { S3HelperService } from '../common/s3-helper.service';
+import { GenAIHelperService } from '../common/gen-ai-helper.service';
 import { Emotion, STYLE_UUIDS } from '../common/constants';
 import { RepositoryProvider } from '../common/repository.provider';
 import { CharacterImg } from '../entities/character-img.entity';
-import { getCharacterPrompt } from './prompt/prompt';
+import { getCharacterPrompt, getCharacterEmotionPrompt } from './prompt/prompt';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { PipelineEvent, PipelineStepPayload } from 'src/pipeline/pipeline.events';
+import { GenStatus } from 'src/entities/common/common.enum';
 
 @Injectable()
 export class ImageService {
   private readonly logger = new Logger(ImageService.name);
-  private readonly apiKey: string;
+  private readonly imageProvider: 'leonardo' | 'gemini';
 
   constructor(
-    private readonly configService: ConfigService,
     private readonly s3HelperService: S3HelperService,
+    private readonly genAI: GenAIHelperService,
     private readonly repo: RepositoryProvider,
+    private readonly eventEmitter: EventEmitter2,
+    private readonly configService: ConfigService,
   ) {
-    this.apiKey =
-      this.configService.get<string>('LEONARDO_AI_API_KEY') ||
-      this.configService.get<string>('LEONARDO_API_KEY') ||
-      '';
+    this.imageProvider =
+      this.configService.get<string>('IMAGE_PROVIDER') === 'gemini' ? 'gemini' : 'leonardo';
   }
 
-  private getHeaders() {
-    return {
-      accept: 'application/json',
-      'content-type': 'application/json',
-      authorization: `Bearer ${this.apiKey}`,
-    };
+  async eventGenCharacterImages(episodeId: string): Promise<void> {
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
+    if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
+    this.eventEmitter.emit(PipelineEvent.CHAR_IMG_START, { episodeId } satisfies PipelineStepPayload);
   }
 
-  async generateCharacterImages(seriesId: string): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
+  async generateCharacterImages(episodeId: string): Promise<void> {
+    const series = await this.repo.series.findByEpisodeId(episodeId);
     if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
 
-    // bug #2 수정: seriesId 기준으로 필터링 후 genId IS NULL인 항목만 조회
     const pendingImages = await this.repo.characterImg
       .createQueryBuilder('ci')
       .innerJoinAndSelect('ci._characterFk', 'c')
-      .where('c.seriesId = :seriesId', { seriesId })
-      .andWhere('ci.genId IS NULL')
+      .where('c.seriesId = :seriesId', { seriesId: series.id })
+      .andWhere('ci.status IN (:...statuses)', { statuses: [GenStatus.PENDING, GenStatus.FAILED] })
       .getMany();
 
     if (pendingImages.length === 0) {
-      this.logger.log(`[${seriesId}] 생성 대기 중인 캐릭터 이미지 없음`);
+      this.logger.log(`[${series.id}] 생성 대기 중인 캐릭터 이미지 없음`);
       return;
     }
 
     const charGroups = Map.groupBy(pendingImages, (pi) => pi.characterId);
-
-    const globalArtStyle   = series.characterArtStyle || '';
-    const actualStyleKey   = series.characterStyleKey || 'DYNAMIC';
+    const globalArtStyle = series.characterArtStyle || '';
+    const actualStyleKey = series.characterStyleKey || 'DYNAMIC';
     const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
 
     this.logger.log(
-      `[${seriesId}] 캐릭터 이미지 생성 시작: ${charGroups.size}명, 총 ${pendingImages.length}개 감정`,
+      `[${series.id}] 캐릭터 이미지 생성 시작: ${charGroups.size}명, 총 ${pendingImages.length}개 감정`,
     );
 
-    const characterPromises = Array.from(charGroups.values()).map((pis) =>
-      this.processCharacter(seriesId, pis, globalArtStyle, selectedStyleUUID).catch((err) =>
-        this.logger.error(`[${pis[0].characterId}] 처리 실패: ${err.message}`),
-      ),
-    );
+    if (this.imageProvider === 'gemini') {
+      await this.generateCharacterImagesBatch(series.id, charGroups, globalArtStyle);
+    } else {
+      const characterPromises = Array.from(charGroups.values()).map((pis) =>
+        this.processCharacter(series.id, pis, globalArtStyle, selectedStyleUUID).catch((err) => {
+          this.logger.error(`[${pis[0].characterId}] 처리 실패: ${err.message}`);
+          throw err;
+        }),
+      );
+      await Promise.all(characterPromises);
+    }
 
-    await Promise.all(characterPromises);
-    this.logger.log(`[${seriesId}] 모든 캐릭터 이미지 생성 완료`);
+    this.logger.log(`[${series.id}] 모든 캐릭터 이미지 생성 완료`);
   }
 
-  async generateBackgroundImages(seriesId: string): Promise<void> {
-    const series = await this.repo.series.findOne({ where: { id: seriesId } });
-    if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
+  async eventGenBackgroundImages(episodeId: string): Promise<void> {
+    const episode = await this.repo.episode.findOne({ where: { id: episodeId } });
+    if (!episode) throw new HttpException('Episode not found', HttpStatus.NOT_FOUND);
+    this.eventEmitter.emit(PipelineEvent.BG_IMG_START, { episodeId } satisfies PipelineStepPayload);
+  }
 
-    const backgrounds = await this.repo.background.find({ where: { seriesId } });
-    if (!backgrounds || backgrounds.length === 0) {
-      this.logger.log(`[${seriesId}] 배경 없음`);
+  async generateBackgroundImages(episodeId: string): Promise<void> {
+    const series = await this.repo.series.findByEpisodeId(episodeId);
+    if (!series) throw new HttpException('Series not found', HttpStatus.NOT_FOUND);
+    const seriesId = series.id;
+
+    const backgrounds = await this.repo.background
+      .createQueryBuilder('b')
+      .where('b.seriesId = :seriesId', { seriesId: series.id })
+      .andWhere('b.status IN (:...statuses)', { statuses: [GenStatus.PENDING, GenStatus.FAILED] })
+      .getMany();
+
+    if (!backgrounds.length) {
+      this.logger.log(`[${seriesId}] 생성할 배경 이미지 없음`);
       return;
     }
 
-    const globalBgArtStyle  = series.backgroundArtStyle || '';
-    const actualStyleKey    = series.backgroundStyleKey || 'DYNAMIC';
-    const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] || STYLE_UUIDS['DYNAMIC'];
+    const globalBgArtStyle = series.backgroundArtStyle ?? '';
+    const actualStyleKey = series.backgroundStyleKey ?? 'DYNAMIC';
+    const selectedStyleUUID = STYLE_UUIDS[actualStyleKey.toUpperCase()] ?? STYLE_UUIDS['DYNAMIC'];
 
-    this.logger.log(`[${seriesId}] 배경 이미지 생성 시작: ${backgrounds.length}개`);
+    this.logger.log(`[${seriesId}] 신규 배경 이미지 생성: ${backgrounds.length}개`);
 
-    const bgPromises = backgrounds.map(async (bg) => {
-      if (bg.genId) return; // 이미 생성된 배경 건너뜀
-      try {
-        const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
-        const { buffer, imageId } = await this.generateImageToBuffer(
-          prompt, undefined, selectedStyleUUID, 1280, 720,
-        );
-        await this.s3HelperService.uploadImage(
-          `series/${seriesId}/backgrounds/${bg.id}.png`, buffer, 'image/png',
-        );
-        bg.genId = imageId;
+    if (this.imageProvider === 'gemini') {
+      for (const bg of backgrounds) {
+        bg.status = GenStatus.PROCESSING;
         await this.repo.background.save(bg);
-        this.logger.log(`[${bg.id}] 배경 이미지 생성 완료`);
-      } catch (err: any) {
-        this.logger.error(`[${bg.id}] 배경 생성 실패: ${err.message}`);
       }
-    });
 
-    await Promise.all(bgPromises);
-    this.logger.log(`[${seriesId}] 모든 배경 이미지 생성 완료`);
+      const bgRequests = backgrounds.map((bg) => ({
+        prompt:      `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`,
+        metadata:    { bgId: bg.id },
+        aspectRatio: '16:9',
+        imageSize:   '2K',
+      }));
+      const bgResults = await this.genAI.geminiBatchGenerateImages(bgRequests);
+
+      for (let i = 0; i < bgResults.length; i++) {
+        const result = bgResults[i];
+        const bg     = backgrounds[i];
+
+        if (result.error) {
+          bg.status = GenStatus.FAILED;
+          await this.repo.background.save(bg);
+          this.logger.error(`[${bg.id}] 배경 배치 생성 실패: ${result.error.message}`);
+          continue;
+        }
+
+        await this.s3HelperService.uploadImage(`series/${seriesId}/backgrounds/${bg.id}.png`, result.buffer!, 'image/png');
+        bg.status = GenStatus.DONE;
+        await this.repo.background.save(bg);
+        this.logger.log(`[${bg.id}] 배경 이미지 완료`);
+      }
+    } else {
+      await Promise.all(
+        backgrounds.map(async (bg) => {
+          bg.status = GenStatus.PROCESSING;
+          await this.repo.background.save(bg);
+
+          try {
+            const prompt = `(${globalBgArtStyle}:1.2), ${actualStyleKey} art style rendering, ${bg.description}, masterpiece, empty scenery, highly detailed landscape, no characters`;
+            const result = await this.genAI.leonardoGenerateImage(prompt, undefined, selectedStyleUUID, 1280, 720);
+            await this.s3HelperService.uploadImage(`series/${seriesId}/backgrounds/${bg.id}.png`, result.buffer, 'image/png');
+            bg.genId  = result.imageId;
+            bg.status = GenStatus.DONE;
+            await this.repo.background.save(bg);
+            this.logger.log(`[${bg.id}] 배경 이미지 완료`);
+          } catch (err: any) {
+            bg.status = GenStatus.FAILED;
+            await this.repo.background.save(bg);
+            this.logger.error(`[${bg.id}] 배경 이미지 실패: ${err.message}`);
+          }
+        }),
+      );
+    }
+
+    this.logger.log(`[${seriesId}] 배경 이미지 생성 완료`);
+  }
+
+  private async generateCharacterImagesBatch(
+    seriesId: string,
+    charGroups: Map<string, CharacterImg[]>,
+    globalArtStyle: string,
+  ): Promise<void> {
+    const defaultBufferMap = new Map<string, Buffer>();
+
+    // ── Phase 1: DEFAULT 배치 ────────────────────────────────────────────────
+    const charsNeedingDefault = [...charGroups.entries()].filter(([, pis]) =>
+      pis.some((pi) => pi.emotion === Emotion.DEFAULT),
+    );
+
+    if (charsNeedingDefault.length > 0) {
+      for (const [, pis] of charsNeedingDefault) {
+        const defaultImg = pis.find((pi) => pi.emotion === Emotion.DEFAULT)!;
+        defaultImg.status = GenStatus.PROCESSING;
+        await this.repo.characterImg.save(defaultImg);
+      }
+
+      const defaultRequests = charsNeedingDefault.map(([charId, pis]) => ({
+        prompt:      getCharacterPrompt(globalArtStyle, pis[0]._characterFk.look, Emotion.DEFAULT, pis[0]._characterFk.subjectCount ?? 1),
+        metadata:    { charId },
+        aspectRatio: '9:16',
+        imageSize:   '1K',
+      }));
+      const defaultResults = await this.genAI.geminiBatchGenerateImages(defaultRequests);
+
+      for (let i = 0; i < defaultResults.length; i++) {
+        const result     = defaultResults[i];
+        const charId     = result.metadata!.charId;
+        const defaultImg = charsNeedingDefault[i][1].find((pi) => pi.emotion === Emotion.DEFAULT)!;
+
+        if (result.error) {
+          defaultImg.status = GenStatus.FAILED;
+          await this.repo.characterImg.save(defaultImg);
+          this.logger.error(`[${charId}] DEFAULT 배치 생성 실패: ${result.error.message}`);
+          continue;
+        }
+
+        const nobgBuffer = await this.genAI.removeImageBackground(result.buffer!);
+        await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${charId}/DEFAULT.png`, result.buffer!, 'image/png');
+        await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, nobgBuffer, 'image/png');
+        defaultImg.status = GenStatus.DONE;
+        await this.repo.characterImg.save(defaultImg);
+        defaultBufferMap.set(charId, result.buffer!);
+        this.logger.log(`[${charId}] DEFAULT 배치 생성 완료`);
+      }
+    }
+
+    // DEFAULT가 이미 DONE인 캐릭터는 S3에서 다운로드
+    const charsNeedingS3 = [...charGroups.keys()].filter((charId) => !defaultBufferMap.has(charId));
+    await Promise.all(
+      charsNeedingS3.map(async (charId) => {
+        const buf = await this.s3HelperService.downloadImage(
+          `series/${seriesId}/characters/${charId}/DEFAULT.png`,
+        );
+        defaultBufferMap.set(charId, buf);
+      }),
+    );
+
+    // ── Phase 2: 감정 배치 ───────────────────────────────────────────────────
+    const pendingEmotions = [...charGroups.values()].flat().filter((pi) => pi.emotion !== Emotion.DEFAULT);
+    if (pendingEmotions.length === 0) return;
+
+    for (const cimg of pendingEmotions) {
+      cimg.status = GenStatus.PROCESSING;
+      await this.repo.characterImg.save(cimg);
+    }
+
+    const emotionRequests = pendingEmotions.map((cimg) => ({
+      prompt:          getCharacterEmotionPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion, 'gemini', cimg._characterFk.subjectCount ?? 1),
+      initImageBuffer: defaultBufferMap.get(cimg.characterId),
+      metadata:        { charId: cimg.characterId, emotion: cimg.emotion },
+      aspectRatio:     '9:16',
+      imageSize:       '1K',
+    }));
+    const emotionResults = await this.genAI.geminiBatchGenerateImages(emotionRequests);
+
+    for (let i = 0; i < emotionResults.length; i++) {
+      const result = emotionResults[i];
+      const cimg   = pendingEmotions[i];
+
+      if (result.error) {
+        cimg.status = GenStatus.FAILED;
+        await this.repo.characterImg.save(cimg);
+        this.logger.error(`[${cimg.characterId}] ${cimg.emotion} 배치 생성 실패: ${result.error.message}`);
+        continue;
+      }
+
+      const nobgBuffer = await this.genAI.removeImageBackground(result.buffer!);
+      await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}.png`, result.buffer!, 'image/png');
+      await this.s3HelperService.uploadImage(`series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`, nobgBuffer, 'image/png');
+      cimg.status = GenStatus.DONE;
+      await this.repo.characterImg.save(cimg);
+      this.logger.log(`[${cimg.characterId}] ${cimg.emotion} 배치 생성 완료`);
+    }
   }
 
   private async processCharacter(
@@ -112,31 +260,60 @@ export class ImageService {
     globalArtStyle: string,
     styleUUID: string,
   ): Promise<void> {
-    let defaultImg = pendingCharImgs.find((pci) => pci.emotion === Emotion.DEFAULT);
+    const defaultImg = pendingCharImgs.find((pci) => pci.emotion === Emotion.DEFAULT);
     if (!defaultImg) throw new HttpException('DEFAULT image entry not found', HttpStatus.BAD_REQUEST);
 
-    const charId   = defaultImg.characterId;
+    const charId = defaultImg.characterId;
     const charInfo = defaultImg._characterFk;
+    let defaultBuffer: Buffer | undefined;
 
-    if (!defaultImg.genId) {
+    if ([GenStatus.PENDING, GenStatus.FAILED].includes(defaultImg.status)) {
       this.logger.log(`[${charId}] DEFAULT 이미지 생성 중...`);
-      const defaultPrompt = getCharacterPrompt(globalArtStyle, charInfo.look, Emotion.DEFAULT);
-      const { buffer, imageId } = await this.generateImageToBuffer(defaultPrompt, undefined, styleUUID);
-      defaultImg.genId = imageId;
+      const defaultPrompt = getCharacterPrompt(globalArtStyle, charInfo.look, Emotion.DEFAULT, charInfo.subjectCount ?? 1);
 
-      await this.s3HelperService.uploadImage(
-        `series/${seriesId}/characters/${charId}/DEFAULT.png`, buffer, 'image/png',
-      );
-      defaultImg.nobgGenId = await this.extractAndSaveNobg(seriesId, defaultImg);
+      defaultImg.status = GenStatus.PROCESSING;
       await this.repo.characterImg.save(defaultImg);
-      this.logger.log(`[${charId}] DEFAULT 생성 완료 (genId: ${imageId})`);
+
+      try {
+        if (this.imageProvider === 'gemini') {
+          ({ buffer: defaultBuffer } = await this.genAI.geminiGenerateImage(defaultPrompt, undefined, '9:16', '1K'));
+          const defaultNobgBuffer = await this.genAI.removeImageBackground(defaultBuffer);
+          await this.s3HelperService.uploadImage(
+          `series/${seriesId}/characters/${charId}/DEFAULT_NOBG.png`, defaultNobgBuffer, 'image/png',
+          );
+        } else {
+          const { buffer, imageId } = await this.genAI.leonardoGenerateImage(defaultPrompt, undefined, styleUUID);
+          defaultBuffer = buffer;
+          defaultImg.genId = imageId;
+          defaultImg.nobgGenId = await this.extractAndSaveNobg(seriesId, defaultImg);
+        }
+
+        await this.s3HelperService.uploadImage(
+          `series/${seriesId}/characters/${charId}/DEFAULT.png`, defaultBuffer, 'image/png',
+        );
+
+        defaultImg.status = GenStatus.DONE;
+        await this.repo.characterImg.save(defaultImg);
+        this.logger.log(`[${charId}] DEFAULT 생성 완료`);
+      } catch (err: any) {
+        defaultImg.status = GenStatus.FAILED;
+        await this.repo.characterImg.save(defaultImg);
+        throw err;
+      }
     }
 
     const remaining = pendingCharImgs.filter((pci) => pci.emotion !== Emotion.DEFAULT);
     if (remaining.length === 0) return;
 
+    // Gemini image-to-image: DEFAULT buffer가 메모리에 없으면 S3에서 다운로드
+    if (this.imageProvider === 'gemini' && !defaultBuffer) {
+      defaultBuffer = await this.s3HelperService.downloadImage(
+        `series/${seriesId}/characters/${charId}/DEFAULT.png`,
+      );
+    }
+
     const emotionPromises = remaining.map((pci) =>
-      this.generateEmotion(seriesId, pci, globalArtStyle, defaultImg.genId, styleUUID).catch((err) =>
+      this.generateEmotion(seriesId, pci, globalArtStyle, styleUUID, defaultImg.genId, defaultBuffer).catch((err) =>
         this.logger.error(`[${charId}] ${pci.emotion} 감정 생성 실패: ${err.message}`),
       ),
     );
@@ -148,109 +325,97 @@ export class ImageService {
     seriesId: string,
     cimg: CharacterImg,
     globalArtStyle: string,
-    initImageId: string,
     styleUUID: string,
+    defaultGenId?: string,   // Leonardo: DEFAULT 이미지 참조 ID
+    defaultBuffer?: Buffer,  // Gemini: DEFAULT 이미지 bytes
   ): Promise<void> {
     const charId = cimg.characterId;
-    const prompt = getCharacterPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion);
-    const { buffer, imageId } = await this.generateImageToBuffer(prompt, initImageId, styleUUID);
-    cimg.genId = imageId;
+    const prompt = getCharacterEmotionPrompt(globalArtStyle, cimg._characterFk.look, cimg.emotion, this.imageProvider, cimg._characterFk.subjectCount ?? 1);
 
-    await this.s3HelperService.uploadImage(
-      `series/${seriesId}/characters/${charId}/${cimg.emotion}.png`, buffer, 'image/png',
-    );
-    cimg.nobgGenId = await this.extractAndSaveNobg(seriesId, cimg);
+    cimg.status = GenStatus.PROCESSING;
     await this.repo.characterImg.save(cimg);
+
+    try {
+      let buffer: Buffer;
+
+      if (this.imageProvider === 'gemini') {
+        ({ buffer } = await this.genAI.geminiGenerateImage(prompt, defaultBuffer, '9:16', '1K'));
+        const nobgBuffer = await this.genAI.removeImageBackground(buffer);
+        await this.s3HelperService.uploadImage(
+        `series/${seriesId}/characters/${charId}/${cimg.emotion}_NOBG.png`, nobgBuffer, 'image/png',
+        );
+      } else {
+        const result = await this.genAI.leonardoGenerateImage(prompt, defaultGenId, styleUUID);
+        buffer = result.buffer;
+        cimg.genId = result.imageId;
+        cimg.nobgGenId = await this.extractAndSaveNobg(seriesId, cimg);
+      }
+
+      await this.s3HelperService.uploadImage(
+        `series/${seriesId}/characters/${charId}/${cimg.emotion}.png`, buffer, 'image/png',
+      );
+      cimg.status = GenStatus.DONE;
+      await this.repo.characterImg.save(cimg);
+    } catch (err: any) {
+      cimg.status = GenStatus.FAILED;
+      await this.repo.characterImg.save(cimg);
+      throw err;
+    }
+  }
+
+  async reprocessNobgForSeries(seriesId: string): Promise<void> {
+    const charImgs = await this.repo.characterImg
+      .createQueryBuilder('ci')
+      .innerJoin('ci._characterFk', 'c')
+      .where('c.seriesId = :seriesId', { seriesId })
+      .andWhere('ci.status = :status', { status: GenStatus.DONE })
+      .getMany();
+
+    if (!charImgs.length) {
+      this.logger.log(`[${seriesId}] NOBG 재생성 대상 없음`);
+      return;
+    }
+
+    this.logger.log(`[${seriesId}] NOBG 재생성 시작: ${charImgs.length}개`);
+
+    const results = await Promise.allSettled(
+      charImgs.map(async (cimg) => {
+        const srcKey  = `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}.png`;
+        const destKey = `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`;
+        const original = await this.s3HelperService.downloadImage(srcKey);
+        const nobg     = await this.genAI.removeImageBackground(original);
+        await this.s3HelperService.uploadImage(destKey, nobg, 'image/png');
+        this.logger.log(`[${cimg.characterId}/${cimg.emotion}] NOBG 재생성 완료`);
+      }),
+    );
+
+    const failed = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+    failed.forEach((r) => this.logger.error(`NOBG 재생성 실패: ${r.reason?.message}`));
+    this.logger.log(
+      `[${seriesId}] NOBG 재생성 완료 (성공: ${charImgs.length - failed.length} / 실패: ${failed.length})`,
+    );
   }
 
   private async extractAndSaveNobg(seriesId: string, cimg: CharacterImg): Promise<string> {
     const targetName = `${cimg.characterId}_${cimg.emotion}`;
-    let nobgGenId: string;
     try {
-      const nobgRes = await axios.post(
-        'https://cloud.leonardo.ai/api/rest/v1/variations/nobg',
-        { id: cimg.genId },
-        { headers: this.getHeaders() },
-      );
-      const sdNobgJobId = nobgRes.data?.sdNobgJob?.id;
-      if (!sdNobgJobId) { this.logger.warn(`[${targetName}] NOBG Job ID 없음`); return nobgGenId; }
-
-      const nobgUrl = await this.poll(`NOBG [${targetName}]`, async () => {
-        const varRes = await axios.get(
-          `https://cloud.leonardo.ai/api/rest/v1/variations/${sdNobgJobId}`,
-          { headers: this.getHeaders() },
-        );
-        const variants = varRes.data?.generated_image_variation_generic;
-        if (variants?.length > 0) {
-          const nobgVar = variants.find((v: any) => v.transformType === 'NOBG');
-          if (nobgVar?.url) { nobgGenId = nobgVar.id; return nobgVar.url as string; }
-        }
-        return null;
-      });
-
-      if (nobgUrl) {
-        const dlRes = await axios.get(nobgUrl, { responseType: 'arraybuffer' });
-        await this.s3HelperService.uploadImage(
-          `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`, dlRes.data, 'image/png',
-        );
-        this.logger.log(`[${targetName}] NOBG S3 저장 완료`);
+      const nobg = await this.genAI.leonardoNobg(cimg.genId);
+      if (!nobg) {
+        this.logger.warn(`[${targetName}] NOBG 결과 없음`);
+        return undefined;
       }
+
+      const dlRes = await (await import('axios')).default.get(nobg.url, { responseType: 'arraybuffer' });
+      await this.s3HelperService.uploadImage(
+        `series/${seriesId}/characters/${cimg.characterId}/${cimg.emotion}_NOBG.png`,
+        dlRes.data,
+        'image/png',
+      );
+      this.logger.log(`[${targetName}] NOBG S3 저장 완료`);
+      return nobg.nobgGenId;
     } catch (err: any) {
       this.logger.error(`[${targetName}] NOBG 실패: ${err.message}`);
+      return undefined;
     }
-    return nobgGenId;
-  }
-
-  private async poll<T>(taskName: string, fn: () => Promise<T | null | undefined>): Promise<T> {
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      const result = await fn();
-      if (result) return result;
-    }
-    throw new Error(`${taskName} timeout after 180s`);
-  }
-
-  private async generateImageToBuffer(
-    prompt: string,
-    initImageId?: string,
-    styleUUID?: string,
-    width = 576,
-    height = 1024,
-  ): Promise<{ buffer: Buffer; imageId: string }> {
-    const payload: any = {
-      model: 'flux-pro-2.0',
-      public: false,
-      parameters: { width, height, quantity: 1, prompt },
-    };
-
-    if (initImageId) {
-      payload.parameters.guidances = {
-        image_reference: [{ image: { id: initImageId, type: 'GENERATED' }, strength: 'HIGH' }],
-      };
-    }
-
-    const response = await axios.post(
-      'https://cloud.leonardo.ai/api/rest/v2/generations',
-      payload,
-      { headers: this.getHeaders() },
-    );
-    const generationId = response.data?.generate?.generationId;
-    if (!generationId) throw new Error('Leonardo API에서 generationId 획득 실패');
-
-    const completedData = await this.poll(`Generation [${generationId}]`, async () => {
-      const statusRes = await axios.get(
-        `https://cloud.leonardo.ai/api/rest/v1/generations/${generationId}`,
-        { headers: this.getHeaders() },
-      );
-      const gen = statusRes.data?.generations_by_pk;
-      if (gen?.status === 'COMPLETE') return gen;
-      if (gen?.status === 'FAILED') throw new Error('Leonardo Generation failed');
-      return null;
-    });
-
-    const imageUrl = completedData.generated_images[0].url;
-    const imageId  = completedData.generated_images[0].id;
-    const imgRes   = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-    return { buffer: Buffer.from(imgRes.data, 'binary'), imageId };
   }
 }

@@ -6,6 +6,7 @@ import { CreateSeriesDto } from './dto/create-series.dto';
 import { SeriesListItemDto } from './dto/series-list.response.dto';
 import { SeriesDetailResponseDto } from './dto/series-detail.response.dto';
 import { SeriesAssetsResponseDto } from './dto/series-assets.response.dto';
+import { GenStatus } from 'src/entities/common/common.enum';
 
 @Injectable()
 export class SeriesService {
@@ -38,10 +39,8 @@ export class SeriesService {
         const defaultImg = await this.repo.characterImg.findOne({
           where: { characterId: firstChar.id, emotion: 'DEFAULT' as any },
         });
-        if (defaultImg?.nobgGenId) {
+        if (defaultImg?.status === GenStatus.DONE){
           thumbnailUrl = `${baseUrl}/series/${s.id}/characters/${firstChar.id}/DEFAULT_NOBG.png`;
-        } else if (defaultImg?.genId) {
-          thumbnailUrl = `${baseUrl}/series/${s.id}/characters/${firstChar.id}/DEFAULT.png`;
         }
       }
 
@@ -68,10 +67,8 @@ export class SeriesService {
         const defaultImg = await this.repo.characterImg.findOne({
           where: { characterId: firstChar.id, emotion: 'DEFAULT' as any },
         });
-        if (defaultImg?.nobgGenId) {
+        if (defaultImg?.status === GenStatus.DONE) {
           thumbnailUrl = `${baseUrl}/series/${s.id}/characters/${firstChar.id}/DEFAULT_NOBG.png`;
-        } else if (defaultImg?.genId) {
-          thumbnailUrl = `${baseUrl}/series/${s.id}/characters/${firstChar.id}/DEFAULT.png`;
         }
       }
       return new SeriesListItemDto(s, episodeCount, thumbnailUrl);
@@ -102,7 +99,18 @@ export class SeriesService {
       order: { episodeNumber: 'ASC' },
     });
 
-    return new SeriesDetailResponseDto(series, episodes);
+    const episodeIds = episodes.map((e) => e.id);
+    const allSteps = episodeIds.length
+      ? await this.repo.pipelineStep.find({ where: { episodeId: In(episodeIds) } })
+      : [];
+
+    const stepsMap = new Map<string, typeof allSteps>();
+    for (const step of allSteps) {
+      if (!stepsMap.has(step.episodeId)) stepsMap.set(step.episodeId, []);
+      stepsMap.get(step.episodeId)!.push(step);
+    }
+
+    return new SeriesDetailResponseDto(series, episodes, stepsMap);
   }
 
   async getSeriesAssets(seriesId: string): Promise<SeriesAssetsResponseDto> {
@@ -128,8 +136,8 @@ export class SeriesService {
     const characterAssets = characters.map((char) => {
       const images = (imagesByChar.get(char.id) ?? []).map((img) => ({
         emotion: img.emotion,
-        url:     img.genId    ? `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}.png`      : null,
-        nobgUrl: img.nobgGenId ? `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}_NOBG.png` : null,
+        url:     img.status === GenStatus.DONE ? `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}.png` : null,
+        nobgUrl: img.status === GenStatus.DONE ? `${baseUrl}/series/${seriesId}/characters/${char.id}/${img.emotion}_NOBG.png` : null,
       }));
       return { id: char.id, name: char.name, sex: char.sex, look: char.look, images };
     });
@@ -138,7 +146,7 @@ export class SeriesService {
       id:          bg.id,
       name:        bg.name,
       description: bg.description,
-      url:         bg.genId ? `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png` : null,
+      url:         bg.status === GenStatus.DONE ? `${baseUrl}/series/${seriesId}/backgrounds/${bg.id}.png` : null,
     }));
 
     return { characters: characterAssets, backgrounds: backgroundAssets };

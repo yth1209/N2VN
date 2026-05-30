@@ -1,6 +1,7 @@
 import { Entity, Column, PrimaryColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { Character } from './character.entity';
 import { Emotion } from '../common/constants';
+import { GenStatus } from './common/common.enum';
 
 @Entity('character_img')
 export class CharacterImg {
@@ -19,4 +20,7 @@ export class CharacterImg {
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   nobgGenId: string;
+
+  @Column({ type: 'enum', enum: GenStatus, nullable: true })
+  status: GenStatus;
 }
