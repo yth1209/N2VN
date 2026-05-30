@@ -1,6 +1,6 @@
 ### API 테스트용 변수 및 설정
 @baseUrl = http://localhost:3000
-@seriesId = 90d173fa-0456-4187-8bdb-54260e24ea57
+@seriesId = 44af2ba9-6098-4966-be73-0ce6bd89ad0a
 @episodeNumber = 1
 @jwtToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlY2Y1MWQ3My05YTIxLTRlMzQtOGNkNC03NzYwNTViNmZkYWYiLCJsb2dpbklkIjoieXRoMTIwOSIsImlhdCI6MTc3NjkwNjI1MCwiZXhwIjoxNzc2OTkyNjUwfQ.yYyst20_EqNjGOC6B8GtNJBY6eZ7A5xSSxEmp-e69rM
 

@@ -6,7 +6,7 @@ import { StructuredOutputParser } from '@langchain/core/output_parsers';
 import { GoogleGenAI, JobState } from '@google/genai';
 import { ZodSchema } from 'zod';
 import axios from 'axios';
-import { removeBackground } from '@imgly/background-removal-node';
+import FormData from 'form-data';
 
 @Injectable()
 export class GenAIHelperService {
@@ -17,6 +17,7 @@ export class GenAIHelperService {
   private readonly geminiImageAI:    GoogleGenAI;
   private readonly geminiImageModel: string;
   private readonly leonardoKey:      string;
+  private readonly photoroomKey:     string;
 
   constructor(private readonly configService: ConfigService) {
     const geminiApiKey = this.configService.get<string>('GEMINI_API_KEY') ?? '';
@@ -37,6 +38,8 @@ export class GenAIHelperService {
       this.configService.get<string>('LEONARDO_AI_API_KEY') ||
       this.configService.get<string>('LEONARDO_API_KEY') ||
       '';
+
+    this.photoroomKey = this.configService.get<string>('PHOTOROOM_API_KEY') ?? '';
   }
 
   // ── Gemini (LangChain) ──────────────────────────────────────────────────────
@@ -216,10 +219,19 @@ export class GenAIHelperService {
   // ── Background Removal ───────────────────────────────────────────────────────
 
   async removeImageBackground(inputBuffer: Buffer): Promise<Buffer> {
-    const blob = new Blob([new Uint8Array(inputBuffer)], { type: 'image/png' });
-    const resultBlob = await removeBackground(blob);
-    const arrayBuffer = await resultBlob.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    const form = new FormData();
+    form.append('image_file', inputBuffer, { filename: 'image.png', contentType: 'image/png' });
+
+    const response = await axios.post(
+      'https://sdk.photoroom.com/v1/segment',
+      form,
+      {
+        headers: { ...form.getHeaders(), 'x-api-key': this.photoroomKey },
+        responseType: 'arraybuffer',
+      },
+    );
+
+    return Buffer.from(response.data);
   }
 
   // ── Gemini Batch Image ──────────────────────────────────────────────────────
